@@ -92,11 +92,13 @@ class TextGenerator:
             return
         from transformers import pipeline
         logger.info(f"Loading text model: {self.model_id}")
+        # Use explicit device (not device_map="auto") so .to("cpu"/"cuda") works
+        # cleanly when we shuttle the model off-GPU during image generation.
         self.pipe = pipeline(
             "text-generation",
             model=self.model_id,
             torch_dtype=DTYPE,
-            device_map="auto",
+            device=DEVICE,
             trust_remote_code=True,
         )
         logger.info(f"Text model loaded successfully on device: {self.pipe.device}")
@@ -317,8 +319,8 @@ class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
         
         # ERNIE uses a specific normalization and patchify
         # Normalize: (latents - bn_mean) / bn_std
-        bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(device)
-        bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + 1e-5).to(device)
+        bn_mean = self.vae.bn.running_mean[:init_latents.shape[1]].view(1, -1, 1, 1).to(device)
+        bn_std = torch.sqrt(self.vae.bn.running_var[:init_latents.shape[1]].view(1, -1, 1, 1) + 1e-5).to(device)
         init_latents = (init_latents - bn_mean) / bn_std
         
         # Patchify
@@ -395,20 +397,33 @@ class ImageGenerator:
 
         logger.info(f"Loading image model: {self.model_id}")
 
-        # Load the custom Ernie pipeline
         self.pipe = ErnieImageImg2ImgPipeline.from_pretrained(
             self.model_id,
             torch_dtype=DTYPE,
         ).to(DEVICE)
 
-        # Enable memory-efficient attention if possible
+        # VAE tiling/slicing chunk the decode into many smaller convs.
+        # On gfx1151, MIOpen has uneven kernel coverage — full-size novel
+        # conv shapes can trigger a solver that hangs the GPU ring, which
+        # resets the device and takes the compositor down. Smaller, more
+        # common shapes are far more likely to hit a known-good kernel.
         try:
-            self.pipe.enable_attention_slicing(1)
+            self.pipe.enable_vae_tiling()
+            logger.info("VAE tiling enabled.")
+        except Exception as e:
+            logger.warning(f"VAE tiling not available on this VAE: {e}")
+
+        try:
             self.pipe.enable_vae_slicing()
         except Exception as e:
-            logger.warning(f"Could not enable attention slicing: {e}")
+            logger.warning(f"VAE slicing not available: {e}")
 
-        logger.info("ERNIE-Image-Turbo loaded successfully on GPU.")
+        try:
+            self.pipe.enable_attention_slicing(1)
+        except Exception as e:
+            logger.warning(f"Attention slicing not available: {e}")
+
+        logger.info("ERNIE-Image-Turbo loaded.")
 
 
     def generate(

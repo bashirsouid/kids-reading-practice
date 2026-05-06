@@ -17,12 +17,12 @@ from logging.handlers import RotatingFileHandler
 # ── Early Logging Setup ──────────────────────────────────────────────────────
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
-LOG_FILE = LOG_DIR / "comic-generator.log"
+LOG_FILE = str(LOG_DIR / "comic-generator.log")
 
 log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 # File Handler
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5)
+file_handler = RotatingFileHandler(str(LOG_FILE), maxBytes=10*1024*1024, backupCount=5)
 file_handler.setFormatter(log_format)
 
 # Console Handler
