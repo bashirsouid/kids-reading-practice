@@ -1,0 +1,28 @@
+services:
+  comic-generator:
+    build: .
+    ports:
+      - "7860:7860"
+    # AMD GPU passthrough (ROCm)
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      # Persistent HuggingFace model cache
+      - hf-cache:/root/.cache/huggingface
+      # Output directory for exported comics
+      - ./output:/app/output
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    # Required for ROCm GPU memory access
+    ipc: host
+    security_opt:
+      - seccomp=unconfined
+    # Restart on crash
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

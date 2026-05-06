@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Comic Book Generator</title>
+<meta name="description" content="Generate children's comic books with AI">
+<link href="https://fonts.googleapis.com/css2?family=Bangers&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f0f1a;--surface:#1a1a2e;--surface2:#16213e;--accent:#e94560;--accent2:#0f3460;--gold:#f5c518;--text:#e0e0e0;--text-dim:#888;--radius:16px;--glass:rgba(255,255,255,0.05)}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+h1,h2,h3,.comic-title{font-family:'Bangers',cursive;letter-spacing:2px}
+
+/* Animated background */
+body::before{content:'';position:fixed;top:0;left:0;width:100%;height:100%;background:radial-gradient(ellipse at 20% 50%,rgba(233,69,96,0.08),transparent 50%),radial-gradient(ellipse at 80% 20%,rgba(15,52,96,0.15),transparent 50%),radial-gradient(ellipse at 50% 80%,rgba(245,197,24,0.05),transparent 50%);z-index:0;pointer-events:none}
+
+.container{max-width:900px;margin:0 auto;padding:20px;position:relative;z-index:1}
+
+/* Header */
+.header{text-align:center;padding:40px 0 20px}
+.header h1{font-size:3rem;background:linear-gradient(135deg,var(--gold),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-shadow:none;margin-bottom:8px}
+.header p{color:var(--text-dim);font-size:1rem}
+
+/* Cards */
+.card{background:var(--surface);border:1px solid var(--glass);border-radius:var(--radius);padding:28px;margin-bottom:20px;backdrop-filter:blur(10px);transition:transform .2s,box-shadow .2s}
+.card:hover{box-shadow:0 8px 32px rgba(233,69,96,0.1)}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 24px;border:none;border-radius:12px;font-family:'Inter',sans-serif;font-weight:600;font-size:.95rem;cursor:pointer;transition:all .2s;text-decoration:none}
+.btn-primary{background:linear-gradient(135deg,var(--accent),#c0392b);color:#fff}
+.btn-primary:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(233,69,96,0.4)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+.btn-secondary{background:var(--surface2);color:var(--text);border:1px solid rgba(255,255,255,0.1)}
+.btn-secondary:hover{background:rgba(255,255,255,0.1)}
+.btn-gold{background:linear-gradient(135deg,var(--gold),#e6a817);color:#111}
+.btn-gold:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(245,197,24,0.3)}
+.btn-sm{padding:8px 16px;font-size:.85rem;border-radius:8px}
+
+/* Mode selector */
+.mode-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+.mode-card{background:var(--surface2);border:2px solid transparent;border-radius:var(--radius);padding:20px;text-align:center;cursor:pointer;transition:all .2s}
+.mode-card:hover{border-color:rgba(233,69,96,0.3);background:rgba(233,69,96,0.05)}
+.mode-card.active{border-color:var(--accent);background:rgba(233,69,96,0.1)}
+.mode-card .emoji{font-size:2rem;margin-bottom:8px;display:block}
+.mode-card .label{font-weight:600;font-size:.95rem}
+.mode-card .desc{font-size:.8rem;color:var(--text-dim);margin-top:4px}
+
+/* Input area */
+.input-area{margin:16px 0}
+.input-area textarea,.input-area input{width:100%;padding:14px;background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:12px;color:var(--text);font-family:'Inter',sans-serif;font-size:.95rem;resize:vertical;transition:border-color .2s}
+.input-area textarea:focus,.input-area input:focus{outline:none;border-color:var(--accent)}
+.input-area textarea{min-height:100px}
+.input-area label{display:block;margin-bottom:8px;font-weight:500;color:var(--text-dim);font-size:.9rem}
+
+/* Progress */
+.progress-section{text-align:center;padding:40px 0}
+.progress-bar-bg{width:100%;height:8px;background:var(--surface2);border-radius:4px;overflow:hidden;margin:20px 0}
+.progress-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--gold));border-radius:4px;transition:width .5s ease}
+.progress-status{font-size:1.1rem;margin-bottom:8px;font-weight:600}
+.progress-detail{color:var(--text-dim);font-size:.9rem}
+
+/* Panel thumbnails during generation */
+.panel-thumbs{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:24px}
+.panel-thumb{aspect-ratio:1;background:var(--surface2);border-radius:12px;overflow:hidden;position:relative;border:2px solid transparent;transition:all .3s}
+.panel-thumb.done{border-color:var(--gold)}
+.panel-thumb img{width:100%;height:100%;object-fit:cover}
+.panel-thumb .badge{position:absolute;top:8px;left:8px;background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.75rem;font-weight:700}
+.panel-thumb .generating{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5)}
+
+/* Spinner */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{width:32px;height:32px;border:3px solid var(--surface2);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto}
+.spinner-sm{width:20px;height:20px;border-width:2px}
+
+/* Editor */
+.editor-layout{display:grid;grid-template-columns:1fr 320px;gap:20px}
+@media(max-width:800px){.editor-layout{grid-template-columns:1fr}.editor-sidebar{order:-1}}
+.preview-wrap{position:relative;border-radius:var(--radius);overflow:hidden;background:var(--surface2)}
+.preview-wrap img{width:100%;display:block}
+.editor-sidebar .panel-list{display:flex;flex-direction:column;gap:8px}
+.panel-item{background:var(--surface2);border-radius:12px;padding:12px;cursor:pointer;border:2px solid transparent;transition:all .2s}
+.panel-item:hover{border-color:rgba(233,69,96,0.3)}
+.panel-item.selected{border-color:var(--accent);background:rgba(233,69,96,0.08)}
+.panel-item .pi-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.panel-item .pi-num{font-weight:700;color:var(--gold);font-family:'Bangers',cursive;font-size:1.1rem}
+.panel-item .pi-caption{font-size:.8rem;color:var(--text-dim);line-height:1.3}
+
+/* Action bar */
+.action-bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.05)}
+.title-edit{display:flex;gap:8px;align-items:center;margin-bottom:16px}
+.title-edit input{flex:1;padding:10px 14px;background:var(--bg);border:1px solid rgba(255,255,255,0.1);border-radius:10px;color:var(--gold);font-family:'Bangers',cursive;font-size:1.3rem;letter-spacing:1px}
+.title-edit input:focus{outline:none;border-color:var(--gold)}
+
+/* Modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px);opacity:0;pointer-events:none;transition:opacity .2s}
+.modal-overlay.show{opacity:1;pointer-events:auto}
+.modal{background:var(--surface);border-radius:var(--radius);padding:28px;max-width:480px;width:90%;border:1px solid rgba(255,255,255,0.1)}
+.modal h3{margin-bottom:16px;color:var(--gold)}
+.modal .input-area{margin:12px 0}
+.modal .btn-row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+
+/* Status badge */
+.status-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:.8rem;font-weight:600}
+.status-badge.loading{background:rgba(245,197,24,0.15);color:var(--gold)}
+.status-badge.ready{background:rgba(46,204,113,0.15);color:#2ecc71}
+.status-badge.error{background:rgba(233,69,96,0.15);color:var(--accent)}
+
+/* Footer */
+.footer{text-align:center;padding:40px 0 20px;color:var(--text-dim);font-size:.8rem}
+
+/* Fade transition */
+.screen{display:none;animation:fadeIn .3s ease}
+.screen.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <h1>🎨 Comic Book Generator</h1>
+    <p>Create magical children's comics with AI</p>
+    <div style="margin-top:12px">
+      <span id="modelStatus" class="status-badge loading"><span class="spinner spinner-sm"></span> Loading models...</span>
+    </div>
+  </div>
+
+  <!-- SCREEN 1: Input -->
+  <div id="screenInput" class="screen active">
+    <div class="card">
+      <h2 style="margin-bottom:16px;color:var(--gold)">✨ Create Your Comic</h2>
+      <div class="mode-grid">
+        <div class="mode-card active" data-mode="random" onclick="selectMode('random')">
+          <span class="emoji">🎲</span>
+          <div class="label">Totally Random</div>
+          <div class="desc">Surprise me with a random story!</div>
+        </div>
+        <div class="mode-card" data-mode="themed" onclick="selectMode('themed')">
+          <span class="emoji">🎯</span>
+          <div class="label">Pick a Theme</div>
+          <div class="desc">Dinosaurs, space, pirates...</div>
+        </div>
+        <div class="mode-card" data-mode="custom" onclick="selectMode('custom')">
+          <span class="emoji">✍️</span>
+          <div class="label">Write Your Story</div>
+          <div class="desc">Describe your own adventure</div>
+        </div>
+      </div>
+
+      <div id="inputThemed" class="input-area" style="display:none">
+        <label>What's the theme?</label>
+        <input type="text" id="themeInput" placeholder="e.g. dinosaurs, lego, underwater, space pirates...">
+      </div>
+      <div id="inputCustom" class="input-area" style="display:none">
+        <label>Describe your story</label>
+        <textarea id="storyInput" placeholder="A brave little robot named Bolt discovers a hidden garden on Mars where flowers glow in the dark..."></textarea>
+      </div>
+
+      <div style="text-align:center;margin-top:20px">
+        <button id="btnGenerate" class="btn btn-primary" onclick="startGeneration()" disabled>
+          🚀 Generate Comic
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN 2: Progress -->
+  <div id="screenProgress" class="screen">
+    <div class="card">
+      <div class="progress-section">
+        <div class="progress-status" id="progressStatus">Preparing...</div>
+        <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar" style="width:0%"></div></div>
+        <div class="progress-detail" id="progressDetail"></div>
+      </div>
+      <div id="storyInfo" style="display:none;margin-top:20px;padding:16px;background:var(--bg);border-radius:12px">
+        <h3 style="color:var(--gold);margin-bottom:8px" id="storyTitle"></h3>
+        <p style="font-size:.9rem;color:var(--text-dim)" id="storySynopsis"></p>
+      </div>
+      <div class="panel-thumbs" id="panelThumbs"></div>
+    </div>
+  </div>
+
+  <!-- SCREEN 3: Editor -->
+  <div id="screenEditor" class="screen">
+    <div class="title-edit">
+      <input type="text" id="titleInput" value="" placeholder="Comic Title">
+      <button class="btn btn-sm btn-secondary" onclick="saveTitle()">Save</button>
+    </div>
+    <div class="editor-layout">
+      <div class="preview-wrap">
+        <img id="previewImg" src="" alt="Comic preview">
+      </div>
+      <div class="editor-sidebar">
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button class="btn btn-gold btn-sm" style="flex:1" onclick="exportComic()">📥 Download PNG</button>
+          <button class="btn btn-secondary btn-sm" onclick="newComic()">🔙 New</button>
+        </div>
+        <h3 style="margin-bottom:8px;font-size:1rem;color:var(--text-dim)">Panels</h3>
+        <div class="panel-list" id="panelList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal for panel actions -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <h3 id="modalTitle">Edit Panel</h3>
+      <div id="modalBody"></div>
+      <div class="btn-row">
+        <button class="btn btn-sm btn-secondary" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-sm btn-primary" id="modalConfirm" onclick="confirmModal()">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">Powered by SDXL Lightning + Qwen 2.5 · Running on AMD ROCm</div>
+</div>
+
+<script>
+// ── State ──
+let currentMode = 'random';
+let currentJobId = null;
+let currentStory = null;
+let ws = null;
+let selectedPanel = null;
+let modalAction = null;
+
+// ── Mode Selection ──
+function selectMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.mode-card').forEach(c => c.classList.toggle('active', c.dataset.mode === mode));
+  document.getElementById('inputThemed').style.display = mode === 'themed' ? 'block' : 'none';
+  document.getElementById('inputCustom').style.display = mode === 'custom' ? 'block' : 'none';
+}
+
+// ── Health Check ──
+async function checkHealth() {
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+    const el = document.getElementById('modelStatus');
+    const btn = document.getElementById('btnGenerate');
+    if (d.models_loaded) {
+      el.className = 'status-badge ready';
+      el.innerHTML = '✅ Models ready';
+      btn.disabled = false;
+    } else if (d.models_loading) {
+      el.className = 'status-badge loading';
+      el.innerHTML = '<span class="spinner spinner-sm"></span> Loading models...';
+      btn.disabled = true;
+      setTimeout(checkHealth, 3000);
+    } else {
+      el.className = 'status-badge error';
+      el.innerHTML = '❌ Model load failed';
+    }
+  } catch {
+    setTimeout(checkHealth, 5000);
+  }
+}
+checkHealth();
+
+// ── Screen Management ──
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// ── Generation ──
+async function startGeneration() {
+  let text = '';
+  if (currentMode === 'themed') text = document.getElementById('themeInput').value;
+  else if (currentMode === 'custom') text = document.getElementById('storyInput').value;
+
+  if (currentMode === 'themed' && !text.trim()) { alert('Please enter a theme'); return; }
+  if (currentMode === 'custom' && !text.trim()) { alert('Please describe your story'); return; }
+
+  try {
+    const r = await fetch('/api/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mode: currentMode, text })
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.detail || 'Error'); return; }
+    currentJobId = d.job_id;
+    showScreen('screenProgress');
+    setupProgressUI();
+    connectWebSocket(d.job_id);
+  } catch (e) { alert('Failed to start: ' + e.message); }
+}
+
+function setupProgressUI() {
+  document.getElementById('progressStatus').textContent = 'Queued...';
+  document.getElementById('progressBar').style.width = '0%';
+  document.getElementById('progressDetail').textContent = '';
+  document.getElementById('storyInfo').style.display = 'none';
+  const thumbs = document.getElementById('panelThumbs');
+  thumbs.innerHTML = '';
+  for (let i = 0; i < 6; i++) {
+    thumbs.innerHTML += `<div class="panel-thumb" id="thumb-${i}"><div class="badge">${i+1}</div></div>`;
+  }
+}
+
+// ── WebSocket ──
+function connectWebSocket(jobId) {
+  if (ws) ws.close();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/${jobId}`);
+  ws.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if (d.type === 'ping') return;
+    handleUpdate(d);
+  };
+  ws.onclose = () => { setTimeout(() => { if (currentJobId === jobId) connectWebSocket(jobId); }, 2000); };
+}
+
+function handleUpdate(d) {
+  const statusEl = document.getElementById('progressStatus');
+  const barEl = document.getElementById('progressBar');
+  const detailEl = document.getElementById('progressDetail');
+
+  const labels = {
+    queued: '⏳ Waiting in queue...',
+    generating_synopsis: '📝 Creating story idea...',
+    generating_story: '📖 Writing the story...',
+    generating_panels: `🎨 Drawing panels (${d.progress_current}/${d.progress_total})...`,
+    complete: '✅ Comic complete!',
+    error: '❌ Error: ' + (d.error || 'Unknown')
+  };
+  statusEl.textContent = labels[d.status] || d.status;
+
+  if (d.status === 'generating_panels') {
+    const pct = (d.progress_current / d.progress_total) * 100;
+    barEl.style.width = pct + '%';
+  } else if (d.status === 'generating_story') {
+    barEl.style.width = '15%';
+  } else if (d.status === 'generating_synopsis') {
+    barEl.style.width = '5%';
+  } else if (d.status === 'complete') {
+    barEl.style.width = '100%';
+  }
+
+  if (d.synopsis) detailEl.textContent = d.synopsis;
+
+  if (d.story) {
+    currentStory = d.story;
+    document.getElementById('storyInfo').style.display = 'block';
+    document.getElementById('storyTitle').textContent = d.story.title;
+    document.getElementById('storySynopsis').textContent = d.synopsis || '';
+  }
+
+  // Update thumbnails
+  if (d.panel_thumbnails) {
+    for (const [idx, b64] of Object.entries(d.panel_thumbnails)) {
+      const el = document.getElementById('thumb-' + idx);
+      if (el && !el.querySelector('img')) {
+        el.classList.add('done');
+        const img = document.createElement('img');
+        img.src = 'data:image/jpeg;base64,' + b64;
+        el.appendChild(img);
+      }
+    }
+  }
+
+  if (d.status === 'complete') {
+    setTimeout(() => showEditor(), 800);
+  }
+}
+
+// ── Editor ──
+async function showEditor() {
+  showScreen('screenEditor');
+  if (currentStory) document.getElementById('titleInput').value = currentStory.title;
+  await refreshPreview();
+  buildPanelList();
+}
+
+async function refreshPreview() {
+  const img = document.getElementById('previewImg');
+  img.src = `/api/preview/${currentJobId}?t=${Date.now()}`;
+}
+
+function buildPanelList() {
+  if (!currentStory) return;
+  const list = document.getElementById('panelList');
+  list.innerHTML = '';
+  currentStory.panels.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'panel-item' + (selectedPanel === i ? ' selected' : '');
+    div.onclick = () => { selectedPanel = i; buildPanelList(); };
+    div.innerHTML = `
+      <div class="pi-header"><span class="pi-num">Panel ${i+1}</span></div>
+      <div class="pi-caption">${p.caption || '(no caption)'}</div>
+      ${selectedPanel === i ? `
+      <div class="action-bar">
+        <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();regenPanel(${i})">🔄 Regen</button>
+        <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();editPanel(${i})">✏️ Edit</button>
+        <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();editCaption(${i})">💬 Caption</button>
+      </div>` : ''}`;
+    list.appendChild(div);
+  });
+}
+
+// ── Panel Actions ──
+function regenPanel(idx) {
+  modalAction = { type: 'regen', index: idx };
+  showModal('Regenerate Panel ' + (idx+1), '<p style="color:var(--text-dim);font-size:.9rem">Generate a new image with the same prompt but different seed?</p>');
+  document.getElementById('modalConfirm').textContent = '🔄 Regenerate';
+}
+
+function editPanel(idx) {
+  modalAction = { type: 'edit', index: idx };
+  showModal('Edit Panel ' + (idx+1), '<div class="input-area"><label>Describe the change</label><input type="text" id="editInput" placeholder="e.g. make it raining, add a rainbow..."></div>');
+  document.getElementById('modalConfirm').textContent = '✏️ Apply';
+}
+
+function editCaption(idx) {
+  const current = currentStory?.panels[idx]?.caption || '';
+  modalAction = { type: 'caption', index: idx };
+  showModal('Edit Caption — Panel ' + (idx+1), `<div class="input-area"><label>Caption text</label><input type="text" id="captionInput" value="${current.replace(/"/g,'&quot;')}"></div>`);
+  document.getElementById('modalConfirm').textContent = '💾 Save';
+}
+
+function showModal(title, body) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = body;
+  document.getElementById('modalOverlay').classList.add('show');
+}
+
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('show');
+  modalAction = null;
+}
+
+async function confirmModal() {
+  if (!modalAction) return;
+  const btn = document.getElementById('modalConfirm');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner spinner-sm"></span>';
+
+  try {
+    if (modalAction.type === 'regen') {
+      await fetch('/api/regenerate-panel', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ job_id: currentJobId, panel_index: modalAction.index })
+      });
+    } else if (modalAction.type === 'edit') {
+      const mod = document.getElementById('editInput').value;
+      await fetch('/api/regenerate-panel', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ job_id: currentJobId, panel_index: modalAction.index, modification: mod })
+      });
+    } else if (modalAction.type === 'caption') {
+      const caption = document.getElementById('captionInput').value;
+      await fetch('/api/update-caption', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ job_id: currentJobId, panel_index: modalAction.index, caption })
+      });
+      if (currentStory) currentStory.panels[modalAction.index].caption = caption;
+    }
+    await refreshPreview();
+    buildPanelList();
+  } catch (e) { alert('Error: ' + e.message); }
+
+  btn.disabled = false;
+  closeModal();
+}
+
+async function saveTitle() {
+  const title = document.getElementById('titleInput').value;
+  await fetch('/api/update-title', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ job_id: currentJobId, title })
+  });
+  if (currentStory) currentStory.title = title;
+  await refreshPreview();
+}
+
+function exportComic() {
+  window.open(`/api/export/${currentJobId}`, '_blank');
+}
+
+function newComic() {
+  if (!confirm('Start a new comic? Current work will be lost.')) return;
+  currentJobId = null; currentStory = null; selectedPanel = null;
+  if (ws) ws.close();
+  showScreen('screenInput');
+}
+</script>
+</body>
+</html>
