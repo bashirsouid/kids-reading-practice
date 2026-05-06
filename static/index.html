@@ -419,7 +419,7 @@ function editPanel(idx) {
 function editCaption(idx) {
   const current = currentStory?.panels[idx]?.caption || '';
   modalAction = { type: 'caption', index: idx };
-  showModal('Edit Caption — Panel ' + (idx+1), `<div class="input-area"><label>Caption text</label><input type="text" id="captionInput" value="${current.replace(/"/g,'&quot;')}"></div>`);
+  showModal('Edit Caption — Panel ' + (idx+1), `<div class="input-area"><label>Caption text</label><textarea id="captionInput" rows="5">${current}</textarea></div>`);
   document.getElementById('modalConfirm').textContent = '💾 Save';
 }
 

@@ -208,7 +208,7 @@ Respond with ONLY valid JSON in this exact format:
       "index": 0,
       "characters": ["CharacterName1", "CharacterName2"],
       "image_prompt": "Detailed image generation prompt describing the scene, characters, setting, action. Include character appearance details. Suitable for children.",
-      "caption": "Exactly 2-3 sentences (25-40 words) describing the scene and narration for kids reading practice."
+      "caption": "Exactly 3-5 sentences (50-70 words) providing rich narration and plenty of reading practice for kids."
     }}
   ]
 }}
@@ -217,8 +217,8 @@ Rules:
 - Exactly 6 panels (index 0-5)
 - "characters" must use the EXACT same character name strings across all panels
 - Each image_prompt must be a vivid, literal visual description of the scene described in the 'caption' to ensure perfect visual alignment.
-- Captions must be 2-3 sentences long, fun, and age-appropriate for children learning to read.
-- Keep it positive and engaging.
+- Captions must be 3-5 sentences long, descriptive, and engaging for children learning to read.
+- Keep it positive and educational.
 - Your response must be ONLY the JSON object, starting with {{ and ending with }}
 """
 
