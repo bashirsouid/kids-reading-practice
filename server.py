@@ -285,11 +285,8 @@ async def process_job(job: ComicJob):
             aspect = pw / img_h
             gen_w = (int(PANEL_GEN_SIZE * aspect) // 64) * 64
             gen_h = (PANEL_GEN_SIZE // 64) * 64
-            full_prompt = (
-                f"{story.art_style}. {story.character_bible}. "
-                f"Scene: {p.image_prompt}. "
-                f"Description: {p.caption}"
-            )
+            # Optimize prompt: Use art style, character bible, and the visual scene description.
+            full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {p.image_prompt}."
             p.image = img_gen.generate(prompt=full_prompt, width=gen_w, height=gen_h)
 
         await loop.run_in_executor(None, generate_single_panel)

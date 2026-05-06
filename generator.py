@@ -312,6 +312,97 @@ class ImageGenerator:
         logger.info(f"Image model LoRA weights fused. Pipeline moved to {DEVICE}.")
         logger.info("Image model loaded successfully on GPU.")
 
+    def _get_chunked_embeddings(self, prompt: str, do_classifier_free_guidance: bool):
+        """
+        Encodes long prompts by chunking them into 77-token blocks and concatenating embeddings.
+        Supports SDXL with two text encoders (CLIP L and CLIP G).
+        """
+        max_length = self.pipe.tokenizer.model_max_length  # 77
+        
+        # Tokenize prompt for both encoders
+        input_ids_1 = self.pipe.tokenizer(
+            prompt, padding="max_length", max_length=max_length, truncation=False, return_tensors="pt"
+        ).input_ids.to(DEVICE)
+        
+        input_ids_2 = self.pipe.tokenizer_2(
+            prompt, padding="max_length", max_length=max_length, truncation=False, return_tensors="pt"
+        ).input_ids.to(DEVICE)
+
+        # If it fits in one chunk, use standard encoding
+        if input_ids_1.shape[1] <= max_length:
+            res = self.pipe.encode_prompt(
+                prompt=prompt,
+                do_classifier_free_guidance=True, # Always get 4 values for consistency
+            )
+            # Standard SDXL order: (prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds)
+            # We return: (prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds)
+            if len(res) == 4:
+                return res[0], res[2], res[1], res[3]
+            else:
+                # Fallback for unexpected lengths
+                return res[0], res[1], res[0], res[1]
+
+        # Manual chunking for long prompts
+        # Extract all tokens (un-padding)
+        tokens_1 = self.pipe.tokenizer.encode(prompt, add_special_tokens=False)
+        tokens_2 = self.pipe.tokenizer_2.encode(prompt, add_special_tokens=False)
+        
+        # Chunk into groups of 75 (to allow for BOS/EOS tokens)
+        chunk_size = max_length - 2
+        chunks_1 = [tokens_1[i : i + chunk_size] for i in range(0, len(tokens_1), chunk_size)]
+        chunks_2 = [tokens_2[i : i + chunk_size] for i in range(0, len(tokens_2), chunk_size)]
+        
+        all_embeds = []
+        pooled_embeds = None
+        
+        for i, (c1, c2) in enumerate(zip(chunks_1, chunks_2)):
+            # Add BOS/EOS tokens and pad to 77
+            c1 = [self.pipe.tokenizer.bos_token_id] + c1 + [self.pipe.tokenizer.eos_token_id]
+            c2 = [self.pipe.tokenizer_2.bos_token_id] + c2 + [self.pipe.tokenizer_2.eos_token_id]
+            
+            c1 += [self.pipe.tokenizer.pad_token_id] * (max_length - len(c1))
+            c2 += [self.pipe.tokenizer_2.pad_token_id] * (max_length - len(c2))
+            
+            ids1 = torch.tensor([c1], device=DEVICE)
+            ids2 = torch.tensor([c2], device=DEVICE)
+            
+            # Encode chunk
+            # SDXL encode_prompt doesn't take raw IDs easily, so we use the internal encoders
+            with torch.no_grad():
+                # Encoder 1 (CLIP L)
+                enc_out_1 = self.pipe.text_encoder(ids1, output_hidden_states=True)
+                embeds_1 = enc_out_1.hidden_states[-2] # SDXL uses penultimate layer
+                
+                # Encoder 2 (CLIP G)
+                enc_out_2 = self.pipe.text_encoder_2(ids2, output_hidden_states=True)
+                embeds_2 = enc_out_2.hidden_states[-2]
+                
+                # Concatenate hidden states along the channel dimension
+                chunk_embeds = torch.cat([embeds_1, embeds_2], dim=-1)
+                all_embeds.append(chunk_embeds)
+                
+                # Pooled embeds only from the first chunk (standard practice)
+                if i == 0:
+                    pooled_embeds = enc_out_2.text_embeds
+
+        prompt_embeds = torch.cat(all_embeds, dim=1)
+        
+        # Create negative embeds (standard empty prompt, padded to match length)
+        # We always want the positive prompt embeddings of an empty string to use as our negative embeddings
+        res = self.pipe.encode_prompt(
+            prompt="",
+            do_classifier_free_guidance=False,
+        )
+        # Handle variations in return length across diffusers versions/pipelines
+        negative_prompt_embeds = res[0]
+        negative_pooled_prompt_embeds = res[2] if len(res) > 2 else res[1]
+        
+        # Tile negative embeds to match long prompt length
+        num_chunks = prompt_embeds.shape[1] // max_length
+        negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_chunks, 1)
+
+        return prompt_embeds, pooled_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds
+
     def generate(
         self,
         prompt: str,
@@ -329,8 +420,16 @@ class ImageGenerator:
             gc.collect()
             torch.cuda.empty_cache()
             
+            # Use helper to handle long prompts (> 77 tokens)
+            prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds = self._get_chunked_embeddings(
+                prompt, guidance > 1.0
+            )
+
             result = self.pipe(
-                prompt=prompt,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
                 width=width,
                 height=height,
                 num_inference_steps=steps,
@@ -485,11 +584,10 @@ def generate_all_panels(
         gen_w = (gen_w // 64) * 64
         gen_h = (gen_h // 64) * 64
 
-        full_prompt = (
-            f"{story.art_style}. {story.character_bible}. "
-            f"Scene: {panel.image_prompt}. "
-            f"Description: {panel.caption}"
-        )
+        # Optimize prompt: Use art style, character bible, and the visual scene description.
+        # We OMIT the raw narrative caption to prevent CLIP confusion and save tokens,
+        # as image_prompt already visually describes the scene.
+        full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
 
         logger.info(f"Generating panel {panel.index + 1}/{total}: {full_prompt[:80]}...")
         panel.image = img_gen.generate(
@@ -521,11 +619,8 @@ def regenerate_panel(
     if modification:
         panel.image_prompt = panel.image_prompt + ". " + modification
 
-    full_prompt = (
-        f"{story.art_style}. {story.character_bible}. "
-        f"Scene: {panel.image_prompt}. "
-        f"Description: {panel.caption}"
-    )
+    # Optimize prompt: Use art style, character bible, and the visual scene description.
+    full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
 
     logger.info(f"Regenerating panel {panel_index + 1}: {full_prompt[:80]}...")
     panel.image = img_gen.generate(
