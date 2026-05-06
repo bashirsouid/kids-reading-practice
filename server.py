@@ -287,7 +287,8 @@ async def process_job(job: ComicJob):
             gen_h = (PANEL_GEN_SIZE // 64) * 64
             full_prompt = (
                 f"{story.art_style}. {story.character_bible}. "
-                f"Scene: {p.image_prompt}"
+                f"Scene: {p.image_prompt}. "
+                f"Description: {p.caption}"
             )
             p.image = img_gen.generate(prompt=full_prompt, width=gen_w, height=gen_h)
 

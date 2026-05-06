@@ -27,7 +27,7 @@ GUTTER = 44
 COLS = 2
 ROWS = 3
 TITLE_H = 220
-CAPTION_H = 100
+CAPTION_H = 200
 PANEL_GEN_SIZE = 768
 
 # ── Model IDs (hardcoded — best options for this hardware) ───────────────────
@@ -208,7 +208,7 @@ Respond with ONLY valid JSON in this exact format:
       "index": 0,
       "characters": ["CharacterName1", "CharacterName2"],
       "image_prompt": "Detailed image generation prompt describing the scene, characters, setting, action. Include character appearance details. Suitable for children.",
-      "caption": "Short dialog or narration text for this panel (max 20 words)"
+      "caption": "Exactly 2-3 sentences (25-40 words) describing the scene and narration for kids reading practice."
     }}
   ]
 }}
@@ -216,9 +216,9 @@ Respond with ONLY valid JSON in this exact format:
 Rules:
 - Exactly 6 panels (index 0-5)
 - "characters" must use the EXACT same character name strings across all panels
-- Each image_prompt must be self-contained, vivid, and describe a children's book illustration
-- Captions should be simple enough for a child learning to read
-- Keep it fun, positive, age-appropriate
+- Each image_prompt must be a vivid, literal visual description of the scene described in the 'caption' to ensure perfect visual alignment.
+- Captions must be 2-3 sentences long, fun, and age-appropriate for children learning to read.
+- Keep it positive and engaging.
 - Your response must be ONLY the JSON object, starting with {{ and ending with }}
 """
 
@@ -487,7 +487,8 @@ def generate_all_panels(
 
         full_prompt = (
             f"{story.art_style}. {story.character_bible}. "
-            f"Scene: {panel.image_prompt}"
+            f"Scene: {panel.image_prompt}. "
+            f"Description: {panel.caption}"
         )
 
         logger.info(f"Generating panel {panel.index + 1}/{total}: {full_prompt[:80]}...")
@@ -522,7 +523,8 @@ def regenerate_panel(
 
     full_prompt = (
         f"{story.art_style}. {story.character_bible}. "
-        f"Scene: {panel.image_prompt}"
+        f"Scene: {panel.image_prompt}. "
+        f"Description: {panel.caption}"
     )
 
     logger.info(f"Regenerating panel {panel_index + 1}: {full_prompt[:80]}...")
