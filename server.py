@@ -10,8 +10,60 @@ import io
 import json
 import logging
 import os
+import sys
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
+
+# ── Early Logging Setup ──────────────────────────────────────────────────────
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / "comic-generator.log"
+
+log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+# File Handler
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5)
+file_handler.setFormatter(log_format)
+
+# Console Handler
+console_handler = logging.StreamHandler(sys.__stdout__)
+console_handler.setFormatter(log_format)
+
+# Root Logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
+# Capture stdout/stderr
+class StreamToLogger:
+    def __init__(self, logger, log_level, stream):
+        self.logger = logger
+        self.log_level = log_level
+        self.stream = stream
+
+    def write(self, buf):
+        if buf.strip():
+            for line in buf.rstrip().splitlines():
+                self.logger.log(self.log_level, line.rstrip())
+        self.stream.write(buf)
+
+    def flush(self):
+        self.stream.flush()
+
+sys.stdout = StreamToLogger(logging.getLogger("STDOUT"), logging.INFO, sys.__stdout__)
+sys.stderr = StreamToLogger(logging.getLogger("STDERR"), logging.ERROR, sys.__stderr__)
+
+# Limit GPU resources (now with logging configured)
+from gpu_utils import limit_gpu_cores
+limit_gpu_cores()
+
+logger = logging.getLogger("comic-server")
+
 import time
 import uuid
+import psutil
+from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -33,15 +85,43 @@ from generator import (
     regenerate_panel,
 )
 
-# ── Logging ──────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("comic-server")
+def log_system_resources(stage: str):
+    """Log current RAM and CPU usage."""
+    try:
+        vm = psutil.virtual_memory()
+        logger.info(f"[{stage}] System Resources: RAM Used: {vm.percent}% ({vm.used // 1024**2}MB / {vm.total // 1024**2}MB)")
+    except Exception as e:
+        logger.warning(f"Could not log system resources: {e}")
+
+# ── Lifespan Handler ─────────────────────────────────────────────────────────
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for model loading and job worker."""
+    global text_gen, img_gen, models_loaded, models_loading
+
+    # Start background worker
+    logger.info("Starting background job worker...")
+    worker_task = asyncio.create_task(job_worker())
+    log_system_resources("STARTUP")
+
+    # Load models in a background thread
+    models_loading = True
+    loop = asyncio.get_event_loop()
+    loading_task = loop.run_in_executor(None, _load_models)
+    
+    yield
+    
+    # Cleanup (optional)
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
 
 # ── App Setup ────────────────────────────────────────────────────────────────
-app = FastAPI(title="AI Comic Book Generator", version="1.0.0")
+app = FastAPI(title="AI Comic Book Generator", version="1.0.0", lifespan=lifespan)
 
 # Serve static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -109,27 +189,14 @@ class UpdateTitleRequest(BaseModel):
     title: str
 
 
-# ── Startup / Model Loading ─────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup():
-    """Load models and start the job worker on server startup."""
-    global text_gen, img_gen, models_loaded, models_loading
-
-    # Start background worker
-    asyncio.create_task(job_worker())
-
-    # Load models in a background thread to not block the server
-    models_loading = True
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _load_models)
-
-
+# ── Run ──────────────────────────────────────────────────────────────────────
 def _load_models():
     """Load both AI models into GPU memory."""
     global text_gen, img_gen, models_loaded, models_loading
     try:
         logger.info("=" * 60)
         logger.info("Loading AI models into GPU memory...")
+        log_system_resources("PRE-MODEL-LOAD")
         logger.info("=" * 60)
 
         text_gen = TextGenerator()
@@ -142,6 +209,7 @@ def _load_models():
         models_loading = False
         logger.info("=" * 60)
         logger.info("All models loaded! Server ready.")
+        log_system_resources("POST-MODEL-LOAD")
         logger.info("=" * 60)
     except Exception as e:
         logger.error(f"Failed to load models: {e}", exc_info=True)
@@ -170,6 +238,8 @@ async def job_worker():
 
 async def process_job(job: ComicJob):
     """Process a single comic generation job."""
+    logger.info(f"--- START PROCESSING JOB {job.job_id} ---")
+    log_system_resources(f"JOB-{job.job_id}-START")
     loop = asyncio.get_event_loop()
 
     # Step 1: Generate synopsis (for random/themed modes)
@@ -203,6 +273,7 @@ async def process_job(job: ComicJob):
 
     # Generate panels one by one with progress updates
     for panel in story.panels:
+        log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
         def generate_single_panel(p=panel):
             from generator import compute_panel_rects, PANEL_GEN_SIZE, CAPTION_H
             rects = compute_panel_rects()
@@ -219,6 +290,9 @@ async def process_job(job: ComicJob):
 
         await loop.run_in_executor(None, generate_single_panel)
         job.progress_current = panel.index + 1
+
+        # Give the GPU and Window Manager some room to breathe
+        await asyncio.sleep(0.5)
 
         # Generate thumbnail for WebSocket preview
         if panel.image:
@@ -553,6 +627,11 @@ async def get_panel_image(job_id: str, panel_index: int):
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Ensure uvicorn logs also go to our file handler
+    for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
+        l = logging.getLogger(logger_name)
+        l.addHandler(file_handler)
+
     uvicorn.run(
         app,
         host="0.0.0.0",

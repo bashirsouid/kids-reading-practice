@@ -99,36 +99,42 @@ class TextGenerator:
             device_map="auto",
             trust_remote_code=True,
         )
-        logger.info("Text model loaded successfully.")
+        logger.info(f"Text model loaded successfully on device: {self.pipe.device}")
 
     def generate(self, prompt: str, max_tokens: int = 2000) -> str:
         """Generate text from a prompt."""
         with self._lock:
             self.load()
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a children's comic book writer. "
-                    "Always respond with valid JSON only. "
-                    "No markdown fences, no explanation, no text outside the JSON object. "
-                    "The response must start with { and end with }."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-        out = self.pipe(
-            messages,
-            max_new_tokens=max_tokens,
-            do_sample=True,
-            temperature=0.3,  # Low temp for reliable JSON
-            return_full_text=False,
-        )
-        generated = out[0]["generated_text"]
-        if isinstance(generated, list):
-            return generated[-1]["content"].strip()
-        else:
-            return generated.strip()
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a children's comic book writer. "
+                        "Always respond with valid JSON only. "
+                        "No markdown fences, no explanation, no text outside the JSON object. "
+                        "The response must start with { and end with }."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ]
+            out = self.pipe(
+                messages,
+                max_new_tokens=max_tokens,
+                do_sample=True,
+                temperature=0.3,  # Low temp for reliable JSON
+                return_full_text=False,
+            )
+            logger.info("Text generation inference complete.")
+            
+            # Ensure GPU work is done and clean up
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+            generated = out[0]["generated_text"]
+            if isinstance(generated, list):
+                return generated[-1]["content"].strip()
+            else:
+                return generated.strip()
 
     def generate_story(self, synopsis: str, max_retries: int = 3) -> ComicStory:
         """Generate a complete comic story structure with retry logic."""
@@ -165,21 +171,26 @@ class TextGenerator:
         with self._lock:
             self.load()
             messages = [
-            {"role": "system", "content": "You are a creative children's story writer. Respond with only the synopsis text."},
-            {"role": "user", "content": prompt},
-        ]
-        out = self.pipe(
-            messages,
-            max_new_tokens=200,
-            do_sample=True,
-            temperature=0.8,
-            return_full_text=False,
-        )
-        generated = out[0]["generated_text"]
-        if isinstance(generated, list):
-            return generated[-1]["content"].strip()
-        else:
-            return generated.strip()
+                {"role": "system", "content": "You are a creative children's story writer. Respond with only the synopsis text."},
+                {"role": "user", "content": prompt},
+            ]
+            out = self.pipe(
+                messages,
+                max_new_tokens=200,
+                do_sample=True,
+                temperature=0.8,
+                return_full_text=False,
+            )
+            
+            # Ensure GPU work is done and clean up
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+            generated = out[0]["generated_text"]
+            if isinstance(generated, list):
+                return generated[-1]["content"].strip()
+            else:
+                return generated.strip()
 
 
 def _build_story_prompt(synopsis: str) -> str:
@@ -291,6 +302,7 @@ class ImageGenerator:
         self.pipe.enable_vae_slicing()
         self.pipe.vae.enable_tiling()
 
+        logger.info(f"Image model LoRA weights fused. Pipeline moved to {DEVICE}.")
         logger.info("Image model loaded successfully on GPU.")
 
     def generate(
@@ -306,25 +318,29 @@ class ImageGenerator:
             self.load()
             
             # Free fragmented memory before heavy allocation
-        import gc
-        gc.collect()
-        torch.cuda.empty_cache()
-        
-        result = self.pipe(
-            prompt=prompt,
-            width=width,
-            height=height,
-            num_inference_steps=steps,
-            guidance_scale=guidance,
-            generator=torch.Generator(device=DEVICE).manual_seed(
-                int.from_bytes(os.urandom(4), "big")
-            ),
-        )
-        
-        # Free intermediate tensors immediately
-        torch.cuda.empty_cache()
-        
-        return result.images[0]
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+            result = self.pipe(
+                prompt=prompt,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                generator=torch.Generator(device=DEVICE).manual_seed(
+                    int.from_bytes(os.urandom(4), "big")
+                ),
+            )
+            logger.info(f"Image generation complete for prompt: {prompt[:50]}...")
+            
+            # Ensure GPU kernels are finished before releasing lock
+            torch.cuda.synchronize()
+            
+            # Free intermediate tensors immediately
+            torch.cuda.empty_cache()
+            
+            return result.images[0]
 
 
 # ── Comic Page Renderer ──────────────────────────────────────────────────────
