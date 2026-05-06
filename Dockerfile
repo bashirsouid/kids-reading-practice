@@ -19,12 +19,15 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install/Upgrade PyTorch for compatibility with Transformers 4.48+
+RUN pip install --no-cache-dir --upgrade torch>=2.5.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+
+# Install other Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY generator.py server.py gpu_utils.py ./
+COPY *.py ./
 COPY static/ ./static/
 
 EXPOSE 7860

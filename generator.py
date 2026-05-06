@@ -11,7 +11,7 @@ import random
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Union, List
 import threading
 
 import torch
@@ -31,7 +31,7 @@ CAPTION_H = 200
 PANEL_GEN_SIZE = 768
 
 # ── Model IDs (hardcoded — best options for this hardware) ───────────────────
-IMAGE_MODEL_ID = "ByteDance/SDXL-Lightning"
+IMAGE_MODEL_ID = "baidu/ERNIE-Image-Turbo"
 TEXT_MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 
 DEVICE = "cuda"
@@ -255,6 +255,130 @@ def _parse_story_json(raw: str, synopsis: str) -> ComicStory:
     )
 
 
+
+# ── Custom Ernie Pipeline ───────────────────────────────────────────────────
+from diffusers import ErnieImagePipeline
+from diffusers.pipelines.ernie_image.pipeline_output import ErnieImagePipelineOutput
+from diffusers.utils.torch_utils import randn_tensor
+
+class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
+    """Custom implementation of Image-to-Image for ErnieImagePipeline."""
+    
+    @torch.no_grad()
+    def __call__(
+        self,
+        prompt: Optional[Union[str, List[str]]] = None,
+        image: Optional[Image.Image] = None,
+        strength: float = 0.6,
+        height: int = 1024,
+        width: int = 1024,
+        num_inference_steps: int = 8,
+        guidance_scale: float = 1.0,
+        num_images_per_prompt: int = 1,
+        generator: Optional[torch.Generator] = None,
+        latents: Optional[torch.Tensor] = None,
+        output_type: str = "pil",
+        return_dict: bool = True,
+        use_pe: bool = True,
+        **kwargs
+    ):
+        if image is None:
+            return super().__call__(
+                prompt=prompt, height=height, width=width, 
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale, generator=generator,
+                latents=latents, output_type=output_type,
+                return_dict=return_dict, use_pe=use_pe, **kwargs
+            )
+
+        device = self._execution_device
+        dtype = self.transformer.dtype
+        self._guidance_scale = guidance_scale
+
+        # 1. Enhance prompt
+        if use_pe and self.pe is not None:
+            prompt = [self._enhance_prompt_with_pe(p, device, width=width, height=height) for p in [prompt] if isinstance(p, str)]
+            if isinstance(prompt, list) and len(prompt) == 1:
+                prompt = prompt[0]
+
+        # 2. Encode prompt
+        text_hiddens = self.encode_prompt(prompt, device, num_images_per_prompt)
+        if self.do_classifier_free_guidance:
+            uncond_text_hiddens = self.encode_prompt("", device, num_images_per_prompt)
+
+        # 3. Prepare image latents
+        # Preprocess and move to device
+        from diffusers.image_processor import VaeImageProcessor
+        image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        init_image = image_processor.preprocess(image, height=height, width=width).to(device=device, dtype=dtype)
+        
+        # Encode
+        init_latents = self.vae.encode(init_image).latent_dist.sample(generator)
+        
+        # ERNIE uses a specific normalization and patchify
+        # Normalize: (latents - bn_mean) / bn_std
+        bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(device)
+        bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + 1e-5).to(device)
+        init_latents = (init_latents - bn_mean) / bn_std
+        
+        # Patchify
+        init_latents = self._patchify_latents(init_latents)
+        
+        # 4. Add noise based on strength
+        # Turbo models use very few steps, so we map strength to steps
+        timesteps_to_run = int(num_inference_steps * strength)
+        if timesteps_to_run < 1: timesteps_to_run = 1
+        
+        # Sigmas for flow matching: 1.0 (noise) -> 0.0 (clean)
+        # For img2img, we start at sigma = strength
+        sigmas = torch.linspace(strength, 0.0, timesteps_to_run + 1).to(device=device, dtype=dtype)
+        self.scheduler.set_timesteps(sigmas=sigmas[:-1], device=device)
+        
+        noise = randn_tensor(init_latents.shape, generator=generator, device=device, dtype=dtype)
+        latents = (1.0 - strength) * init_latents + strength * noise
+
+        # 5. Denoising loop
+        cfg_text_hiddens = list(uncond_text_hiddens) + list(text_hiddens) if self.do_classifier_free_guidance else text_hiddens
+        text_bth, text_lens = self._pad_text(
+            text_hiddens=cfg_text_hiddens, device=device, dtype=dtype, text_in_dim=self.transformer.config.text_in_dim
+        )
+
+        for i, t in enumerate(self.scheduler.timesteps):
+            latent_model_input = torch.cat([latents, latents], dim=0) if self.do_classifier_free_guidance else latents
+            t_batch = torch.full((latent_model_input.shape[0],), t.item(), device=device, dtype=dtype)
+
+            pred = self.transformer(
+                hidden_states=latent_model_input,
+                timestep=t_batch,
+                text_bth=text_bth,
+                text_lens=text_lens,
+                return_dict=False,
+            )[0]
+
+            if self.do_classifier_free_guidance:
+                pred_uncond, pred_cond = pred.chunk(2, dim=0)
+                pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+
+            latents = self.scheduler.step(pred, t, latents).prev_sample
+
+        # 6. Post-process
+        if output_type == "latent":
+            return latents
+
+        # Unnormalize and Unpatchify
+        latents = latents * bn_std + bn_mean
+        latents = self._unpatchify_latents(latents)
+        
+        images = self.vae.decode(latents, return_dict=False)[0]
+        images = (images.clamp(-1, 1) + 1) / 2
+        images = images.cpu().permute(0, 2, 3, 1).float().numpy()
+
+        if output_type == "pil":
+            images = [Image.fromarray((img * 255).astype("uint8")) for img in images]
+
+        return ErnieImagePipelineOutput(images=images, revised_prompts=None)
+
+
 # ── Image Generator ──────────────────────────────────────────────────────────
 class ImageGenerator:
     """Generates comic panel images using SDXL Lightning (4-step)."""
@@ -268,168 +392,47 @@ class ImageGenerator:
         """Load the image model into GPU memory."""
         if self.pipe is not None:
             return
-        from diffusers import StableDiffusionXLPipeline, EulerDiscreteScheduler
-        from huggingface_hub import hf_hub_download
 
         logger.info(f"Loading image model: {self.model_id}")
 
-        # SDXL Lightning uses a base SDXL model + LoRA weights
-        base_model = "stabilityai/stable-diffusion-xl-base-1.0"
-
-        self.pipe = StableDiffusionXLPipeline.from_pretrained(
-            base_model,
+        # Load the custom Ernie pipeline
+        self.pipe = ErnieImageImg2ImgPipeline.from_pretrained(
+            self.model_id,
             torch_dtype=DTYPE,
-            variant="fp16",
-        )
-
-        # Load the 4-step Lightning LoRA
-        self.pipe.load_lora_weights(
-            hf_hub_download(self.model_id, "sdxl_lightning_4step_lora.safetensors")
-        )
-        self.pipe.fuse_lora()
-
-        # Configure scheduler for Lightning
-        self.pipe.scheduler = EulerDiscreteScheduler.from_config(
-            self.pipe.scheduler.config,
-            timestep_spacing="trailing",
-        )
-
-        # Move to GPU — no offloading needed with 75 GB budget
-        self.pipe = self.pipe.to(DEVICE)
-
-        # Replace standard VAE with TinyVAE for massive speedup and stability on iGPUs
-        from diffusers import AutoencoderTiny
-        logger.info("Loading TinyVAE (madebyollin/taesdxl)...")
-        self.pipe.vae = AutoencoderTiny.from_pretrained(
-            "madebyollin/taesdxl", 
-            torch_dtype=DTYPE
         ).to(DEVICE)
 
-        # Enable memory-efficient attention and slicing
-        self.pipe.enable_attention_slicing(1)
-        self.pipe.enable_vae_slicing()
+        # Enable memory-efficient attention if possible
+        try:
+            self.pipe.enable_attention_slicing(1)
+            self.pipe.enable_vae_slicing()
+        except Exception as e:
+            logger.warning(f"Could not enable attention slicing: {e}")
 
-        logger.info(f"Image model LoRA weights fused. Pipeline moved to {DEVICE}.")
-        logger.info("Image model loaded successfully on GPU.")
+        logger.info("ERNIE-Image-Turbo loaded successfully on GPU.")
 
-    def _get_chunked_embeddings(self, prompt: str, do_classifier_free_guidance: bool):
-        """
-        Encodes long prompts by chunking them into 77-token blocks and concatenating embeddings.
-        Supports SDXL with two text encoders (CLIP L and CLIP G).
-        """
-        max_length = self.pipe.tokenizer.model_max_length  # 77
-        
-        # Tokenize prompt for both encoders
-        input_ids_1 = self.pipe.tokenizer(
-            prompt, padding="max_length", max_length=max_length, truncation=False, return_tensors="pt"
-        ).input_ids.to(DEVICE)
-        
-        input_ids_2 = self.pipe.tokenizer_2(
-            prompt, padding="max_length", max_length=max_length, truncation=False, return_tensors="pt"
-        ).input_ids.to(DEVICE)
-
-        # If it fits in one chunk, use standard encoding
-        if input_ids_1.shape[1] <= max_length:
-            res = self.pipe.encode_prompt(
-                prompt=prompt,
-                do_classifier_free_guidance=True, # Always get 4 values for consistency
-            )
-            # Standard SDXL order: (prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds)
-            # We return: (prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds)
-            if len(res) == 4:
-                return res[0], res[2], res[1], res[3]
-            else:
-                # Fallback for unexpected lengths
-                return res[0], res[1], res[0], res[1]
-
-        # Manual chunking for long prompts
-        # Extract all tokens (un-padding)
-        tokens_1 = self.pipe.tokenizer.encode(prompt, add_special_tokens=False)
-        tokens_2 = self.pipe.tokenizer_2.encode(prompt, add_special_tokens=False)
-        
-        # Chunk into groups of 75 (to allow for BOS/EOS tokens)
-        chunk_size = max_length - 2
-        chunks_1 = [tokens_1[i : i + chunk_size] for i in range(0, len(tokens_1), chunk_size)]
-        chunks_2 = [tokens_2[i : i + chunk_size] for i in range(0, len(tokens_2), chunk_size)]
-        
-        all_embeds = []
-        pooled_embeds = None
-        
-        for i, (c1, c2) in enumerate(zip(chunks_1, chunks_2)):
-            # Add BOS/EOS tokens and pad to 77
-            c1 = [self.pipe.tokenizer.bos_token_id] + c1 + [self.pipe.tokenizer.eos_token_id]
-            c2 = [self.pipe.tokenizer_2.bos_token_id] + c2 + [self.pipe.tokenizer_2.eos_token_id]
-            
-            c1 += [self.pipe.tokenizer.pad_token_id] * (max_length - len(c1))
-            c2 += [self.pipe.tokenizer_2.pad_token_id] * (max_length - len(c2))
-            
-            ids1 = torch.tensor([c1], device=DEVICE)
-            ids2 = torch.tensor([c2], device=DEVICE)
-            
-            # Encode chunk
-            # SDXL encode_prompt doesn't take raw IDs easily, so we use the internal encoders
-            with torch.no_grad():
-                # Encoder 1 (CLIP L)
-                enc_out_1 = self.pipe.text_encoder(ids1, output_hidden_states=True)
-                embeds_1 = enc_out_1.hidden_states[-2] # SDXL uses penultimate layer
-                
-                # Encoder 2 (CLIP G)
-                enc_out_2 = self.pipe.text_encoder_2(ids2, output_hidden_states=True)
-                embeds_2 = enc_out_2.hidden_states[-2]
-                
-                # Concatenate hidden states along the channel dimension
-                chunk_embeds = torch.cat([embeds_1, embeds_2], dim=-1)
-                all_embeds.append(chunk_embeds)
-                
-                # Pooled embeds only from the first chunk (standard practice)
-                if i == 0:
-                    pooled_embeds = enc_out_2.text_embeds
-
-        prompt_embeds = torch.cat(all_embeds, dim=1)
-        
-        # Create negative embeds (standard empty prompt, padded to match length)
-        # We always want the positive prompt embeddings of an empty string to use as our negative embeddings
-        res = self.pipe.encode_prompt(
-            prompt="",
-            do_classifier_free_guidance=False,
-        )
-        # Handle variations in return length across diffusers versions/pipelines
-        negative_prompt_embeds = res[0]
-        negative_pooled_prompt_embeds = res[2] if len(res) > 2 else res[1]
-        
-        # Tile negative embeds to match long prompt length
-        num_chunks = prompt_embeds.shape[1] // max_length
-        negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_chunks, 1)
-
-        return prompt_embeds, pooled_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds
 
     def generate(
         self,
         prompt: str,
         width: int = 1024,
         height: int = 1024,
-        steps: int = 4,
+        steps: int = 8,
         guidance: float = 1.0,
+        init_image: Optional[Image.Image] = None,
+        strength: float = 0.6,
     ) -> Image.Image:
-        """Generate an image from a text prompt."""
+        """Generate an image from a text prompt, optionally using an init image for consistency."""
         with self._lock:
             self.load()
             
-            # Free fragmented memory before heavy allocation
             import gc
             gc.collect()
             torch.cuda.empty_cache()
             
-            # Use helper to handle long prompts (> 77 tokens)
-            prompt_embeds, pooled_prompt_embeds, negative_prompt_embeds, negative_pooled_prompt_embeds = self._get_chunked_embeddings(
-                prompt, guidance > 1.0
-            )
-
             result = self.pipe(
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                prompt=prompt,
+                image=init_image,
+                strength=strength,
                 width=width,
                 height=height,
                 num_inference_steps=steps,
@@ -440,11 +443,7 @@ class ImageGenerator:
             )
             logger.info(f"Image generation complete for prompt: {prompt[:50]}...")
             
-            # Ensure GPU kernels are finished before releasing lock
             torch.cuda.synchronize()
-            
-            # Free intermediate tensors immediately and collect garbage
-            import gc
             gc.collect()
             torch.cuda.empty_cache()
             
@@ -574,6 +573,7 @@ def generate_all_panels(
     rects = compute_panel_rects()
     total = len(story.panels)
 
+    anchor_image = None
     for panel in story.panels:
         pw, ph = rects[panel.index][2], rects[panel.index][3]
         img_h = ph - CAPTION_H
@@ -581,20 +581,24 @@ def generate_all_panels(
 
         gen_h = PANEL_GEN_SIZE
         gen_w = int(PANEL_GEN_SIZE * aspect)
-        gen_w = (gen_w // 64) * 64
-        gen_h = (gen_h // 64) * 64
+        gen_w = (gen_w // 16) * 16  # ERNIE needs divisibility by 16
+        gen_h = (gen_h // 16) * 16
 
-        # Optimize prompt: Use art style, character bible, and the visual scene description.
-        # We OMIT the raw narrative caption to prevent CLIP confusion and save tokens,
-        # as image_prompt already visually describes the scene.
         full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
 
         logger.info(f"Generating panel {panel.index + 1}/{total}: {full_prompt[:80]}...")
+        
+        # Use anchor image for consistency if it's not the first panel
         panel.image = img_gen.generate(
             prompt=full_prompt,
             width=gen_w,
             height=gen_h,
+            init_image=anchor_image,
+            strength=0.6 if anchor_image else 1.0,
         )
+
+        if panel.index == 0:
+            anchor_image = panel.image
 
         if progress_callback:
             progress_callback(panel.index + 1, total)
@@ -623,9 +627,14 @@ def regenerate_panel(
     full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
 
     logger.info(f"Regenerating panel {panel_index + 1}: {full_prompt[:80]}...")
+    # Use the first panel as anchor if it exists for consistency
+    anchor_image = story.panels[0].image if len(story.panels) > 0 and story.panels[0].image else None
+    
     panel.image = img_gen.generate(
         prompt=full_prompt,
         width=gen_w,
         height=gen_h,
+        init_image=anchor_image if panel_index > 0 else None,
+        strength=0.6 if panel_index > 0 and anchor_image else 1.0,
     )
     return panel.image

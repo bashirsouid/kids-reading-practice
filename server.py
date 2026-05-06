@@ -275,6 +275,7 @@ async def process_job(job: ComicJob):
     await broadcast_job_update(job)
 
     # Generate panels one by one with progress updates
+    anchor_image = None
     for panel in story.panels:
         log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
         def generate_single_panel(p=panel):
@@ -283,11 +284,21 @@ async def process_job(job: ComicJob):
             pw, ph = rects[p.index][2], rects[p.index][3]
             img_h = ph - CAPTION_H
             aspect = pw / img_h
-            gen_w = (int(PANEL_GEN_SIZE * aspect) // 64) * 64
-            gen_h = (PANEL_GEN_SIZE // 64) * 64
+            gen_w = (int(PANEL_GEN_SIZE * aspect) // 16) * 16
+            gen_h = (PANEL_GEN_SIZE // 16) * 16
             # Optimize prompt: Use art style, character bible, and the visual scene description.
             full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {p.image_prompt}."
-            p.image = img_gen.generate(prompt=full_prompt, width=gen_w, height=gen_h)
+            
+            nonlocal anchor_image
+            p.image = img_gen.generate(
+                prompt=full_prompt, 
+                width=gen_w, 
+                height=gen_h,
+                init_image=anchor_image,
+                strength=0.6 if anchor_image else 1.0
+            )
+            if p.index == 0:
+                anchor_image = p.image
 
         await loop.run_in_executor(None, generate_single_panel)
         job.progress_current = panel.index + 1
