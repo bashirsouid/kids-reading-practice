@@ -51,6 +51,9 @@ class StreamToLogger:
     def flush(self):
         self.stream.flush()
 
+    def isatty(self):
+        return self.stream.isatty()
+
 sys.stdout = StreamToLogger(logging.getLogger("STDOUT"), logging.INFO, sys.__stdout__)
 sys.stderr = StreamToLogger(logging.getLogger("STDERR"), logging.ERROR, sys.__stderr__)
 
@@ -292,7 +295,7 @@ async def process_job(job: ComicJob):
         job.progress_current = panel.index + 1
 
         # Give the GPU and Window Manager some room to breathe
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
 
         # Generate thumbnail for WebSocket preview
         if panel.image:

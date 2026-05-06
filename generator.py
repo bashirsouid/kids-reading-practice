@@ -297,10 +297,17 @@ class ImageGenerator:
         # Move to GPU — no offloading needed with 75 GB budget
         self.pipe = self.pipe.to(DEVICE)
 
-        # Enable memory-efficient attention, slicing, and tiling to prevent GPU timeouts on APUs
+        # Replace standard VAE with TinyVAE for massive speedup and stability on iGPUs
+        from diffusers import AutoencoderTiny
+        logger.info("Loading TinyVAE (madebyollin/taesdxl)...")
+        self.pipe.vae = AutoencoderTiny.from_pretrained(
+            "madebyollin/taesdxl", 
+            torch_dtype=DTYPE
+        ).to(DEVICE)
+
+        # Enable memory-efficient attention and slicing
         self.pipe.enable_attention_slicing(1)
         self.pipe.enable_vae_slicing()
-        self.pipe.vae.enable_tiling()
 
         logger.info(f"Image model LoRA weights fused. Pipeline moved to {DEVICE}.")
         logger.info("Image model loaded successfully on GPU.")
@@ -337,7 +344,9 @@ class ImageGenerator:
             # Ensure GPU kernels are finished before releasing lock
             torch.cuda.synchronize()
             
-            # Free intermediate tensors immediately
+            # Free intermediate tensors immediately and collect garbage
+            import gc
+            gc.collect()
             torch.cuda.empty_cache()
             
             return result.images[0]

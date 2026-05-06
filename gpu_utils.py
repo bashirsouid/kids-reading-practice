@@ -59,12 +59,11 @@ def limit_gpu_cores():
                     except (ValueError, IndexError):
                         continue
 
-        # 3. Apply the mask (N-1)
+        # 3. Apply the mask (target N-1, but max 24 for stability on APUs)
         if cu_count and cu_count > 1:
-            limit = cu_count - 1
+            limit = min(cu_count - 1, 24)
             # HSA_CU_MASK is a bitmask of CUs to enable.
-            # We set 'limit' bits to 1, effectively disabling the last CU.
-            # For 40 CUs, limit=39 -> (1 << 39) - 1 = 0x7FFFFFFFFF
+            # We set 'limit' bits to 1.
             mask_val = (1 << limit) - 1
             mask_hex = hex(mask_val)
             
