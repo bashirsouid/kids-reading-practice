@@ -8,6 +8,7 @@ and comic page rendering (PIL-based 8.5x11" layout).
 import json
 import os
 import random
+import re
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,7 +33,10 @@ PANEL_GEN_SIZE = 768
 
 # ── Model IDs (hardcoded — best options for this hardware) ───────────────────
 IMAGE_MODEL_ID = "baidu/ERNIE-Image-Turbo"
-TEXT_MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
+# Qwen2.5-3B-Instruct: ~3x faster than 7B on this GPU, still strong at the
+# 6-panel structured-JSON task. The 7B variant was overkill for the work
+# and made the retry loop painful when the LLM produced malformed JSON.
+TEXT_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
@@ -55,6 +59,10 @@ class ComicStory:
     art_style: str
     character_bible: str
     panels: list[Panel] = field(default_factory=list)
+    # Hidden reference image of all characters together. Used as the img2img
+    # init for every panel so style/character identity stays consistent even
+    # for characters that don't appear until later panels. Never rendered.
+    master_reference: Optional[Image.Image] = None
 
 
 # ── Random Story Themes ──────────────────────────────────────────────────────
@@ -103,8 +111,14 @@ class TextGenerator:
         )
         logger.info(f"Text model loaded successfully on device: {self.pipe.device}")
 
-    def generate(self, prompt: str, max_tokens: int = 2000) -> str:
-        """Generate text from a prompt."""
+    def generate(self, prompt: str, max_tokens: int = 1500) -> str:
+        """Generate text from a prompt.
+
+        Uses a structured plain-text format (not JSON) for the story —
+        empirically far more reliable on small models than JSON, which
+        breaks on a single missing comma or unescaped quote. max_tokens
+        is sized for the full 6-panel story plus headroom.
+        """
         with self._lock:
             self.load()
             messages = [
@@ -112,9 +126,11 @@ class TextGenerator:
                     "role": "system",
                     "content": (
                         "You are a children's comic book writer. "
-                        "Always respond with valid JSON only. "
-                        "No markdown fences, no explanation, no text outside the JSON object. "
-                        "The response must start with { and end with }."
+                        "When asked for a story, respond using the exact "
+                        "labeled plain-text format requested by the user. "
+                        "Do not use JSON. Do not wrap your answer in markdown "
+                        "code fences. Do not add commentary, headings, or "
+                        "any text outside the format."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -123,7 +139,7 @@ class TextGenerator:
                 messages,
                 max_new_tokens=max_tokens,
                 do_sample=True,
-                temperature=0.3,  # Low temp for reliable JSON
+                temperature=0.5,
                 return_full_text=False,
             )
             logger.info("Text generation inference complete.")
@@ -144,8 +160,8 @@ class TextGenerator:
         for attempt in range(max_retries):
             try:
                 raw = self.generate(prompt)
-                return _parse_story_json(raw, synopsis)
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                return _parse_story_text(raw, synopsis)
+            except (KeyError, ValueError) as e:
                 logger.warning(f"Story generation attempt {attempt + 1} failed: {e}")
                 if attempt == max_retries - 1:
                     raise ValueError(
@@ -196,63 +212,123 @@ class TextGenerator:
 
 
 def _build_story_prompt(synopsis: str) -> str:
-    """Build the JSON generation prompt for a comic story."""
-    return f"""Create a 6-panel children's comic book story based on this synopsis:
+    """Build the structured plain-text prompt for a comic story.
+
+    A plain-text labeled format is used instead of JSON. Small instruction-
+    tuned models (3–7B) reliably break JSON on long outputs (missing commas,
+    unescaped quotes inside captions). The same models reproduce a labeled
+    plain-text format almost perfectly because there is no syntax to break.
+    """
+    return f"""Write a 6-panel children's comic book story based on this synopsis:
 "{synopsis}"
 
-Respond with ONLY valid JSON in this exact format:
-{{
-  "title": "Story Title",
-  "art_style": "bright colorful children's book illustration style, clean lines, friendly characters",
-  "character_bible": "Brief description of each character's appearance for consistent rendering",
-  "panels": [
-    {{
-      "index": 0,
-      "characters": ["CharacterName1", "CharacterName2"],
-      "image_prompt": "Detailed image generation prompt describing the scene, characters, setting, action. Include character appearance details. Suitable for children.",
-      "caption": "Exactly 3-5 sentences (50-70 words) providing rich narration and plenty of reading practice for kids."
-    }}
-  ]
-}}
+Use EXACTLY the following labeled plain-text format. Do not output JSON.
+Do not output markdown. Do not add any commentary before or after.
 
-Rules:
-- Exactly 6 panels (index 0-5)
-- "characters" must use the EXACT same character name strings across all panels
-- Each image_prompt must be a vivid, literal visual description of the scene described in the 'caption' to ensure perfect visual alignment.
-- Captions must be 3-5 sentences long, descriptive, and engaging for children learning to read.
-- Keep it positive and educational.
-- Your response must be ONLY the JSON object, starting with {{ and ending with }}
-"""
+TITLE: <story title on one line>
+
+ART_STYLE: <one short sentence describing the visual style, e.g. "bright colorful children's book illustration, clean lines, friendly characters">
+
+CHARACTER_BIBLE: <one paragraph describing EVERY character that appears in ANY panel of this story, including characters introduced in later panels (e.g., aliens that show up only in panel 3 or 4). For each character cover: species/type, body shape, dominant colors and markings, distinctive features, clothing/accessories.>
+
+PANEL 1
+CHARACTERS: <comma-separated list of character names appearing in this panel; use the same name spellings across panels>
+SCENE: <vivid literal visual description of the panel — characters, setting, action; suitable as an image-generation prompt>
+CAPTION: <exactly 3 to 5 sentences (50 to 70 words) of narration for kids learning to read>
+
+PANEL 2
+CHARACTERS: ...
+SCENE: ...
+CAPTION: ...
+
+(Continue with PANEL 3, PANEL 4, PANEL 5, and PANEL 6 in the same format.)
+
+Keep the story positive and educational. Output exactly six panels labeled
+PANEL 1 through PANEL 6."""
 
 
-def _parse_story_json(raw: str, synopsis: str) -> ComicStory:
-    """Parse raw LLM output into a ComicStory dataclass."""
-    # Extract JSON from response (handle any stray text)
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise ValueError("LLM did not return valid JSON")
-    data = json.loads(raw[start:end])
+# Top-level header fields that appear before PANEL 1.
+_HEADER_FIELDS = ("TITLE", "ART_STYLE", "CHARACTER_BIBLE")
 
-    if "panels" not in data:
-        raise KeyError("Missing 'panels' key in response")
-    if len(data["panels"]) != 6:
-        raise ValueError(f"Expected 6 panels, got {len(data['panels'])}")
+# Per-panel field block. We anchor on "PANEL <n>" and grab the three labeled
+# sub-fields up to the next PANEL marker or end of string. DOTALL lets fields
+# span multiple lines, which is fine because the next field label terminates
+# the current one via lookahead.
+_PANEL_BLOCK_RE = re.compile(
+    r"PANEL\s+(\d+)\b(.*?)(?=\bPANEL\s+\d+\b|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_PANEL_FIELD_RE = re.compile(
+    r"\b(CHARACTERS|SCENE|CAPTION)\s*:\s*(.*?)(?=\b(?:CHARACTERS|SCENE|CAPTION)\s*:|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_HEADER_FIELD_RE = re.compile(
+    r"\b(TITLE|ART_STYLE|CHARACTER_BIBLE)\s*:\s*(.*?)"
+    r"(?=\b(?:TITLE|ART_STYLE|CHARACTER_BIBLE)\s*:|\bPANEL\s+\d+\b|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
 
-    panels = [
-        Panel(
-            index=p["index"],
-            image_prompt=p.get("image_prompt", ""),
-            caption=p.get("caption", ""),
-            characters=p.get("characters", []),
+
+def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
+    """Parse the labeled plain-text comic format into a ComicStory."""
+    text = raw.strip()
+    # Strip markdown fences if the model wrapped the response anyway.
+    if text.startswith("```"):
+        nl = text.find("\n")
+        if nl != -1:
+            text = text[nl + 1:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+
+    # Split off the header (everything before PANEL 1) for the top-level fields.
+    panel1_match = re.search(r"\bPANEL\s+1\b", text, re.IGNORECASE)
+    header = text[: panel1_match.start()] if panel1_match else text
+
+    headers: dict[str, str] = {}
+    for m in _HEADER_FIELD_RE.finditer(header):
+        headers[m.group(1).upper()] = m.group(2).strip()
+
+    panels: list[Panel] = []
+    seen_indices: set[int] = set()
+    for block in _PANEL_BLOCK_RE.finditer(text):
+        idx_1based = int(block.group(1))
+        if idx_1based in seen_indices:
+            continue
+        seen_indices.add(idx_1based)
+        body = block.group(2)
+
+        fields: dict[str, str] = {}
+        for fm in _PANEL_FIELD_RE.finditer(body):
+            fields[fm.group(1).upper()] = fm.group(2).strip()
+
+        scene = fields.get("SCENE", "").strip()
+        caption = fields.get("CAPTION", "").strip()
+        chars_raw = fields.get("CHARACTERS", "").strip()
+        characters = [c.strip() for c in re.split(r"[,;]\s*", chars_raw) if c.strip()]
+
+        if not scene or not caption:
+            # An incomplete panel block — drop it, the retry loop will handle it.
+            continue
+
+        panels.append(
+            Panel(
+                index=idx_1based - 1,  # store 0-based to keep render logic identical
+                characters=characters,
+                image_prompt=scene,
+                caption=caption,
+            )
         )
-        for p in data["panels"]
-    ]
+
+    if len(panels) != 6:
+        raise ValueError(f"Expected 6 panels, got {len(panels)}")
+
+    panels.sort(key=lambda p: p.index)
+
     return ComicStory(
-        title=data.get("title", "Untitled"),
+        title=headers.get("TITLE", "Untitled").strip() or "Untitled",
         synopsis=synopsis,
-        art_style=data.get("art_style", "children's book illustration"),
-        character_bible=data.get("character_bible", ""),
+        art_style=headers.get("ART_STYLE", "children's book illustration"),
+        character_bible=headers.get("CHARACTER_BIBLE", ""),
         panels=panels,
     )
 
@@ -628,41 +704,92 @@ def _draw_wrapped_text(
 
 
 # ── Generation Orchestrator ──────────────────────────────────────────────────
+# Strength used for every panel's img2img against the master reference.
+# At 0.75 the latents start as 0.25*init + 0.75*noise and run ~6 denoising
+# steps (out of 8 turbo steps), which is high enough that the prompt drives
+# the actual scene composition but low enough that the master ref's style
+# and character likenesses bleed through.
+PANEL_IMG2IMG_STRENGTH = 0.75
+
+
+def _panel_gen_dims(panel_index: int) -> tuple[int, int]:
+    """Return (width, height) the image model should generate for a panel."""
+    rects = compute_panel_rects()
+    pw, ph = rects[panel_index][2], rects[panel_index][3]
+    img_h = ph - CAPTION_H
+    aspect = pw / img_h
+    gen_w = (int(PANEL_GEN_SIZE * aspect) // 16) * 16  # ERNIE needs /16
+    gen_h = (PANEL_GEN_SIZE // 16) * 16
+    return gen_w, gen_h
+
+
+def generate_master_reference(
+    story: ComicStory,
+    img_gen: "ImageGenerator",
+) -> Image.Image:
+    """Generate the hidden master character reference image.
+
+    The previous design anchored every panel on the first generated panel,
+    which (a) caused panels to look like duplicates and (b) had no anchor
+    for characters introduced in panel 2+ (e.g., aliens landing later).
+    The master reference is a single illustration drawn from the full
+    character_bible — every character of the story is present from the
+    start. Each panel then runs img2img against it so identities stay
+    consistent regardless of when the character first appears in the plot.
+
+    The reference is not added to the rendered comic page.
+    """
+    # Match panel 0's aspect so the latent shapes line up cleanly when used
+    # as init_image for any panel.
+    gen_w, gen_h = _panel_gen_dims(0)
+
+    prompt = (
+        f"{story.art_style}. "
+        f"Single group illustration showing all the main characters of this "
+        f"story together in one frame, full body view, friendly poses, plain "
+        f"neutral background, soft daylight, clear faces, no text and no "
+        f"labels. Characters: {story.character_bible}"
+    )
+
+    logger.info("Generating master character reference image...")
+    img = img_gen.generate(
+        prompt=prompt,
+        width=gen_w,
+        height=gen_h,
+        steps=8,
+        guidance=1.0,
+        init_image=None,
+        strength=1.0,
+    )
+    story.master_reference = img
+    logger.info("Master reference ready.")
+    return img
+
+
 def generate_all_panels(
     story: ComicStory,
     img_gen: ImageGenerator,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ):
     """Generate images for all panels in a story."""
-    rects = compute_panel_rects()
     total = len(story.panels)
 
-    anchor_image = None
+    if story.master_reference is None:
+        generate_master_reference(story, img_gen)
+
     for panel in story.panels:
-        pw, ph = rects[panel.index][2], rects[panel.index][3]
-        img_h = ph - CAPTION_H
-        aspect = pw / img_h
-
-        gen_h = PANEL_GEN_SIZE
-        gen_w = int(PANEL_GEN_SIZE * aspect)
-        gen_w = (gen_w // 16) * 16  # ERNIE needs divisibility by 16
-        gen_h = (gen_h // 16) * 16
-
+        gen_w, gen_h = _panel_gen_dims(panel.index)
         full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
 
         logger.info(f"Generating panel {panel.index + 1}/{total}: {full_prompt[:80]}...")
-        
-        # Use anchor image for consistency if it's not the first panel
+
         panel.image = img_gen.generate(
             prompt=full_prompt,
             width=gen_w,
             height=gen_h,
-            init_image=anchor_image,
-            strength=0.6 if anchor_image else 1.0,
+            init_image=story.master_reference,
+            strength=PANEL_IMG2IMG_STRENGTH,
         )
-
-        if panel.index == 0:
-            anchor_image = panel.image
 
         if progress_callback:
             progress_callback(panel.index + 1, total)
@@ -676,29 +803,24 @@ def regenerate_panel(
 ) -> Image.Image:
     """Regenerate a single panel, optionally with a text modification."""
     panel = story.panels[panel_index]
-    rects = compute_panel_rects()
-    pw, ph = rects[panel_index][2], rects[panel_index][3]
-    img_h = ph - CAPTION_H
-    aspect = pw / img_h
-
-    gen_w = (int(PANEL_GEN_SIZE * aspect) // 64) * 64
-    gen_h = (PANEL_GEN_SIZE // 64) * 64
+    gen_w, gen_h = _panel_gen_dims(panel_index)
 
     if modification:
         panel.image_prompt = panel.image_prompt + ". " + modification
 
-    # Optimize prompt: Use art style, character bible, and the visual scene description.
     full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
-
     logger.info(f"Regenerating panel {panel_index + 1}: {full_prompt[:80]}...")
-    # Use the first panel as anchor if it exists for consistency
-    anchor_image = story.panels[0].image if len(story.panels) > 0 and story.panels[0].image else None
-    
+
+    # Lazily build the master reference if a panel is being regenerated on a
+    # legacy story that doesn't have one yet.
+    if story.master_reference is None:
+        generate_master_reference(story, img_gen)
+
     panel.image = img_gen.generate(
         prompt=full_prompt,
         width=gen_w,
         height=gen_h,
-        init_image=anchor_image if panel_index > 0 else None,
-        strength=0.6 if panel_index > 0 and anchor_image else 1.0,
+        init_image=story.master_reference,
+        strength=PANEL_IMG2IMG_STRENGTH,
     )
     return panel.image

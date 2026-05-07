@@ -274,8 +274,21 @@ async def process_job(job: ComicJob):
     job.progress_total = len(story.panels)
     await broadcast_job_update(job)
 
-    # Generate panels one by one with progress updates
-    anchor_image = None
+    # Step 3a: Generate the hidden master character reference. Every panel
+    # is then img2img'd against this so style and character identity stay
+    # consistent — even for characters that don't appear until later panels.
+    from generator import generate_master_reference, PANEL_IMG2IMG_STRENGTH
+
+    def gen_master():
+        generate_master_reference(story, img_gen)
+
+    logger.info(f"Job {job.job_id}: generating master character reference...")
+    log_system_resources(f"JOB-{job.job_id}-MASTER-REF")
+    await loop.run_in_executor(None, gen_master)
+    # Breather between successive GPU jobs (helps the WM stay responsive).
+    await asyncio.sleep(1.0)
+
+    # Step 3b: Generate each panel using the master reference as init.
     for panel in story.panels:
         log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
         def generate_single_panel(p=panel):
@@ -286,19 +299,15 @@ async def process_job(job: ComicJob):
             aspect = pw / img_h
             gen_w = (int(PANEL_GEN_SIZE * aspect) // 16) * 16
             gen_h = (PANEL_GEN_SIZE // 16) * 16
-            # Optimize prompt: Use art style, character bible, and the visual scene description.
             full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {p.image_prompt}."
-            
-            nonlocal anchor_image
+
             p.image = img_gen.generate(
-                prompt=full_prompt, 
-                width=gen_w, 
+                prompt=full_prompt,
+                width=gen_w,
                 height=gen_h,
-                init_image=anchor_image,
-                strength=0.6 if anchor_image else 1.0
+                init_image=story.master_reference,
+                strength=PANEL_IMG2IMG_STRENGTH,
             )
-            if p.index == 0:
-                anchor_image = p.image
 
         await loop.run_in_executor(None, generate_single_panel)
         job.progress_current = panel.index + 1
