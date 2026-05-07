@@ -16,21 +16,25 @@ ENV HIP_VISIBLE_DEVICES=0
 ENV PYTORCH_HIP_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.6
 
 # ── MIOpen behavior on gfx1151 ─────────────────────────────────────────
-# The compositor-killing crash at the first VAE decode looks like an
-# amdgpu ring timeout, not OOM. The most common trigger on gfx1151 is
-# MIOpen autotuning a novel conv shape: the solver search picks an
-# implementation that hangs the device instead of returning an error,
-# and the watchdog resets the GPU (taking every GPU client with it).
+# The compositor-killing crash at the first VAE decode is an amdgpu
+# ring timeout, not OOM. Primary mitigation now lives in generator.py
+# (the VAE is pinned to CPU). These env vars cover the few convs that
+# still execute on the GPU (transformer side of the pipeline) so they
+# stay on known-good kernels.
 #
 # FIND_MODE=2 = FAST: skip the autotune/find pass and use heuristics.
-# We trade a little per-shape perf for not hanging on the first call.
 ENV MIOPEN_FIND_MODE=2
 # Persistent kernel cache behavior
 # We disable these to prevent the "Cannot open database file" error and potential hangs
 ENV MIOPEN_DEBUG_DISABLE_USERDB=1
 ENV MIOPEN_DEBUG_DISABLE_KCACHE=1
-# Workaround for GEMM-based convolution hangs/errors on RDNA3
+# Disable the conv solvers that have historically hung on RDNA3 / gfx1151.
+# Direct + Implicit GEMM are the most reliable on this hardware.
 ENV MIOPEN_DEBUG_CONV_GEMM=0
+ENV MIOPEN_DEBUG_CONV_FFT=0
+ENV MIOPEN_DEBUG_CONV_WINOGRAD=0
+# Force the Implicit GEMM dynamic kernels to be the primary solver.
+ENV MIOPEN_DEBUG_CONV_IMPLICIT_GEMM=1
 RUN mkdir -p /root/.cache/miopen && chmod -R 777 /root/.cache/miopen
 # Verbose AMD logging — useful while we're still narrowing this down.
 # Drop to 1 or remove once stable.

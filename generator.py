@@ -263,6 +263,38 @@ from diffusers import ErnieImagePipeline
 from diffusers.pipelines.ernie_image.pipeline_output import ErnieImagePipelineOutput
 from diffusers.utils.torch_utils import randn_tensor
 
+
+def _patch_vae_for_cpu_execution(vae):
+    """Pin VAE to CPU (fp32) and route encode/decode through CPU.
+
+    On gfx1151 (Strix Halo / Ryzen AI Max) the VAE decode at the end of
+    generation hits conv shapes whose MIOpen solver hangs the GPU ring;
+    the kernel watchdog then resets the device and takes the host
+    compositor down with it. Keeping the VAE on CPU sidesteps the entire
+    class of hang. The VAE is small and a 768×768 decode finishes in
+    ~1–2s on this hardware — a fine trade for not crashing the desktop.
+    """
+    vae.to(device="cpu", dtype=torch.float32)
+    vae.eval()
+
+    original_decode = vae.decode
+    original_encode = vae.encode
+
+    def safe_decode(z, *args, **kwargs):
+        with torch.no_grad():
+            z_cpu = z.detach().to(device="cpu", dtype=torch.float32)
+            return original_decode(z_cpu, *args, **kwargs)
+
+    def safe_encode(x, *args, **kwargs):
+        with torch.no_grad():
+            x_cpu = x.detach().to(device="cpu", dtype=torch.float32)
+            return original_encode(x_cpu, *args, **kwargs)
+
+    vae.decode = safe_decode
+    vae.encode = safe_encode
+    return vae
+
+
 class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
     """Custom implementation of Image-to-Image for ErnieImagePipeline."""
     
@@ -309,22 +341,33 @@ class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
             uncond_text_hiddens = self.encode_prompt("", device, num_images_per_prompt)
 
         # 3. Prepare image latents
-        # Preprocess and move to device
+        # VAE is pinned to CPU/fp32 for stability — preprocess stays on
+        # CPU/fp32 to match, then we promote latents to (device, dtype)
+        # for the diffusion loop.
         from diffusers.image_processor import VaeImageProcessor
         image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
-        init_image = image_processor.preprocess(image, height=height, width=width).to(device=device, dtype=dtype)
-        
-        # Encode
-        init_latents = self.vae.encode(init_image).latent_dist.sample(generator)
-        
-        # ERNIE uses a specific normalization and patchify
-        # Normalize: (latents - bn_mean) / bn_std
-        bn_mean = self.vae.bn.running_mean[:init_latents.shape[1]].view(1, -1, 1, 1).to(device)
-        bn_std = torch.sqrt(self.vae.bn.running_var[:init_latents.shape[1]].view(1, -1, 1, 1) + 1e-5).to(device)
-        init_latents = (init_latents - bn_mean) / bn_std
-        
-        # Patchify
+        init_image_cpu = image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
+
+        # Use .mode() rather than .sample(generator): the patched VAE
+        # returns CPU tensors and `generator` lives on CUDA, so sample()
+        # would device-mismatch. Img2img adds explicit noise below, so
+        # a deterministic encode is fine.
+        init_latents = self.vae.encode(init_image_cpu).latent_dist.mode()
+        init_latents = init_latents.to(device=device, dtype=dtype)
+
+        # Patchify first, THEN normalize — order matters. The bn buffers
+        # are sized for the 128-channel patchified latent space, so the
+        # original "normalize 32ch then patchify" path was incorrect (and
+        # would shape-mismatch on the unnormalize side after denoising).
+        # This mirrors the parent ErnieImagePipeline txt2img path.
         init_latents = self._patchify_latents(init_latents)
+
+        # Handle case where VAE BN stats have more channels than latents (e.g., due to different model versions)
+        bn_mean = self.vae.bn.running_mean[:init_latents.shape[1]].view(1, -1, 1, 1).to(device=device, dtype=dtype)
+        bn_std = torch.sqrt(
+            self.vae.bn.running_var[:init_latents.shape[1]].view(1, -1, 1, 1).to(dtype=torch.float32) + 1e-5
+        ).to(device=device, dtype=dtype)
+        init_latents = (init_latents - bn_mean) / bn_std
         
         # 4. Add noise based on strength
         # Turbo models use very few steps, so we map strength to steps
@@ -333,8 +376,11 @@ class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
         
         # Sigmas for flow matching: 1.0 (noise) -> 0.0 (clean)
         # For img2img, we start at sigma = strength
-        sigmas = torch.linspace(strength, 0.0, timesteps_to_run + 1).to(device=device, dtype=dtype)
-        self.scheduler.set_timesteps(sigmas=sigmas[:-1], device=device)
+        # Ensure we use float32 for scheduler compatibility to avoid BFloat16 issues
+        sigmas = torch.linspace(strength, 0.0, timesteps_to_run + 1, dtype=torch.float32, device=device)
+        # Convert to numpy array for scheduler to avoid tensor type issues
+        sigmas_np = sigmas[:-1].cpu().numpy()
+        self.scheduler.set_timesteps(sigmas=sigmas_np, device=device)
         
         noise = randn_tensor(init_latents.shape, generator=generator, device=device, dtype=dtype)
         latents = (1.0 - strength) * init_latents + strength * noise
@@ -347,7 +393,7 @@ class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
 
         for i, t in enumerate(self.scheduler.timesteps):
             latent_model_input = torch.cat([latents, latents], dim=0) if self.do_classifier_free_guidance else latents
-            t_batch = torch.full((latent_model_input.shape[0],), t.item(), device=device, dtype=dtype)
+            t_batch = torch.full((latent_model_input.shape[0],), t.to(dtype=torch.float32).item(), device=device, dtype=dtype)
 
             pred = self.transformer(
                 hidden_states=latent_model_input,
@@ -371,9 +417,10 @@ class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
         latents = latents * bn_std + bn_mean
         latents = self._unpatchify_latents(latents)
         
+        # vae.decode is patched to run on CPU/fp32; result is a CPU tensor.
         images = self.vae.decode(latents, return_dict=False)[0]
         images = (images.clamp(-1, 1) + 1) / 2
-        images = images.cpu().permute(0, 2, 3, 1).float().numpy()
+        images = images.permute(0, 2, 3, 1).float().cpu().numpy()
 
         if output_type == "pil":
             images = [Image.fromarray((img * 255).astype("uint8")) for img in images]
@@ -391,7 +438,7 @@ class ImageGenerator:
         self._lock = threading.Lock()
 
     def load(self):
-        """Load the image model into GPU memory."""
+        """Load the image model into GPU memory (with VAE pinned to CPU)."""
         if self.pipe is not None:
             return
 
@@ -402,21 +449,12 @@ class ImageGenerator:
             torch_dtype=DTYPE,
         ).to(DEVICE)
 
-        # VAE tiling/slicing chunk the decode into many smaller convs.
-        # On gfx1151, MIOpen has uneven kernel coverage — full-size novel
-        # conv shapes can trigger a solver that hangs the GPU ring, which
-        # resets the device and takes the compositor down. Smaller, more
-        # common shapes are far more likely to hit a known-good kernel.
-        try:
-            self.pipe.enable_vae_tiling()
-            logger.info("VAE tiling enabled.")
-        except Exception as e:
-            logger.warning(f"VAE tiling not available on this VAE: {e}")
-
-        try:
-            self.pipe.enable_vae_slicing()
-        except Exception as e:
-            logger.warning(f"VAE slicing not available: {e}")
+        # Pin the VAE to CPU. End-of-generation VAE convs were hanging
+        # the amdgpu ring on gfx1151 and resetting the GPU (which kills
+        # both this process and the host compositor). VAE tiling/slicing
+        # only reduce the probability — running on CPU eliminates it.
+        self.pipe.vae = _patch_vae_for_cpu_execution(self.pipe.vae)
+        logger.info("VAE pinned to CPU/fp32 for gfx1151 stability.")
 
         try:
             self.pipe.enable_attention_slicing(1)
@@ -437,31 +475,42 @@ class ImageGenerator:
         strength: float = 0.6,
     ) -> Image.Image:
         """Generate an image from a text prompt, optionally using an init image for consistency."""
+        import gc
+
         with self._lock:
             self.load()
-            
-            import gc
+
+            # Drain anything left over (text-gen logits, prior panel
+            # latents) before kicking off another GPU job. Cheap to do.
             gc.collect()
-            torch.cuda.empty_cache()
-            
-            result = self.pipe(
-                prompt=prompt,
-                image=init_image,
-                strength=strength,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                generator=torch.Generator(device=DEVICE).manual_seed(
-                    int.from_bytes(os.urandom(4), "big")
-                ),
-            )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
+            seed = int.from_bytes(os.urandom(4), "big")
+
+            with torch.inference_mode():
+                result = self.pipe(
+                    prompt=prompt,
+                    image=init_image,
+                    strength=strength,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=torch.Generator(device=DEVICE).manual_seed(seed),
+                    # ERNIE's prompt-enhancer is a separate LLM that
+                    # piles more pressure onto the GPU. Keeping it off
+                    # is one less moving part on flaky hardware.
+                    use_pe=False,
+                )
             logger.info(f"Image generation complete for prompt: {prompt[:50]}...")
-            
-            torch.cuda.synchronize()
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
             gc.collect()
-            torch.cuda.empty_cache()
-            
+
             return result.images[0]
 
 
