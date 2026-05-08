@@ -32,10 +32,28 @@ CAPTION_H = 200
 PANEL_GEN_SIZE = 768
 
 # ── Model IDs (hardcoded — best options for this hardware) ───────────────────
-IMAGE_MODEL_ID = "baidu/ERNIE-Image-Turbo"
+# SDXL base + SDXL-Lightning 4-step LoRA + IP-Adapter Plus.
+#   * Lightning gives us 4-step inference (fast, comparable to ERNIE-Turbo's 8).
+#   * IP-Adapter Plus is what actually gets us cross-panel character
+#     consistency: it conditions the cross-attention on a reference image's
+#     embeddings, instead of (incorrectly) constraining the latent the way
+#     img2img does. Works even on distilled/turbo schedules because it
+#     biases the model's output without eating denoising budget.
+IMAGE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
+LIGHTNING_LORA_REPO = "ByteDance/SDXL-Lightning"
+LIGHTNING_LORA_FILE = "sdxl_lightning_4step_lora.safetensors"
+IP_ADAPTER_REPO = "h94/IP-Adapter"
+IP_ADAPTER_SUBFOLDER = "sdxl_models"
+IP_ADAPTER_WEIGHT = "ip-adapter-plus_sdxl_vit-h.safetensors"
+# Scale 0.0 = ignore reference; 1.0 = strongly bias toward reference.
+# 0.6 leaves enough headroom for the prompt to drive scene composition
+# while keeping characters recognisable across panels.
+IP_ADAPTER_SCALE = 0.6
+PANEL_INFERENCE_STEPS = 4
+
 # Qwen2.5-3B-Instruct: ~3x faster than 7B on this GPU, still strong at the
-# 6-panel structured-JSON task. The 7B variant was overkill for the work
-# and made the retry loop painful when the LLM produced malformed JSON.
+# 6-panel structured story task. The 7B variant was overkill for the work
+# and made the retry loop painful when the LLM produced malformed output.
 TEXT_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
 DEVICE = "cuda"
@@ -59,9 +77,11 @@ class ComicStory:
     art_style: str
     character_bible: str
     panels: list[Panel] = field(default_factory=list)
-    # Hidden reference image of all characters together. Used as the img2img
-    # init for every panel so style/character identity stays consistent even
-    # for characters that don't appear until later panels. Never rendered.
+    # Hidden reference image of all characters together. Generated up front
+    # and passed as the IP-Adapter conditioning image for every panel so
+    # character identity stays consistent across panels — including for
+    # characters that don't appear until later in the plot. Not rendered
+    # in the final comic page.
     master_reference: Optional[Image.Image] = None
 
 
@@ -334,12 +354,7 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
 
 
 
-# ── Custom Ernie Pipeline ───────────────────────────────────────────────────
-from diffusers import ErnieImagePipeline
-from diffusers.pipelines.ernie_image.pipeline_output import ErnieImagePipelineOutput
-from diffusers.utils.torch_utils import randn_tensor
-
-
+# ── VAE Stability Patch (gfx1151) ────────────────────────────────────────────
 def _patch_vae_for_cpu_execution(vae):
     """Pin VAE to CPU (fp32) and route encode/decode through CPU.
 
@@ -347,8 +362,10 @@ def _patch_vae_for_cpu_execution(vae):
     generation hits conv shapes whose MIOpen solver hangs the GPU ring;
     the kernel watchdog then resets the device and takes the host
     compositor down with it. Keeping the VAE on CPU sidesteps the entire
-    class of hang. The VAE is small and a 768×768 decode finishes in
-    ~1–2s on this hardware — a fine trade for not crashing the desktop.
+    class of hang. The VAE is small and a decode finishes in ~1–2s on
+    this hardware — a fine trade for not crashing the desktop. This is
+    architecture-agnostic; the same patch works for AutoencoderKL (SDXL)
+    and AutoencoderKLFlux2 (ERNIE) alike.
     """
     vae.to(device="cpu", dtype=torch.float32)
     vae.eval()
@@ -371,142 +388,17 @@ def _patch_vae_for_cpu_execution(vae):
     return vae
 
 
-class ErnieImageImg2ImgPipeline(ErnieImagePipeline):
-    """Custom implementation of Image-to-Image for ErnieImagePipeline."""
-    
-    @torch.no_grad()
-    def __call__(
-        self,
-        prompt: Optional[Union[str, List[str]]] = None,
-        image: Optional[Image.Image] = None,
-        strength: float = 0.6,
-        height: int = 1024,
-        width: int = 1024,
-        num_inference_steps: int = 8,
-        guidance_scale: float = 1.0,
-        num_images_per_prompt: int = 1,
-        generator: Optional[torch.Generator] = None,
-        latents: Optional[torch.Tensor] = None,
-        output_type: str = "pil",
-        return_dict: bool = True,
-        use_pe: bool = True,
-        **kwargs
-    ):
-        if image is None:
-            return super().__call__(
-                prompt=prompt, height=height, width=width, 
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale, generator=generator,
-                latents=latents, output_type=output_type,
-                return_dict=return_dict, use_pe=use_pe, **kwargs
-            )
-
-        device = self._execution_device
-        dtype = self.transformer.dtype
-        self._guidance_scale = guidance_scale
-
-        # 1. Enhance prompt
-        if use_pe and self.pe is not None:
-            prompt = [self._enhance_prompt_with_pe(p, device, width=width, height=height) for p in [prompt] if isinstance(p, str)]
-            if isinstance(prompt, list) and len(prompt) == 1:
-                prompt = prompt[0]
-
-        # 2. Encode prompt
-        text_hiddens = self.encode_prompt(prompt, device, num_images_per_prompt)
-        if self.do_classifier_free_guidance:
-            uncond_text_hiddens = self.encode_prompt("", device, num_images_per_prompt)
-
-        # 3. Prepare image latents
-        # VAE is pinned to CPU/fp32 for stability — preprocess stays on
-        # CPU/fp32 to match, then we promote latents to (device, dtype)
-        # for the diffusion loop.
-        from diffusers.image_processor import VaeImageProcessor
-        image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
-        init_image_cpu = image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
-
-        # Use .mode() rather than .sample(generator): the patched VAE
-        # returns CPU tensors and `generator` lives on CUDA, so sample()
-        # would device-mismatch. Img2img adds explicit noise below, so
-        # a deterministic encode is fine.
-        init_latents = self.vae.encode(init_image_cpu).latent_dist.mode()
-        init_latents = init_latents.to(device=device, dtype=dtype)
-
-        # Patchify first, THEN normalize — order matters. The bn buffers
-        # are sized for the 128-channel patchified latent space, so the
-        # original "normalize 32ch then patchify" path was incorrect (and
-        # would shape-mismatch on the unnormalize side after denoising).
-        # This mirrors the parent ErnieImagePipeline txt2img path.
-        init_latents = self._patchify_latents(init_latents)
-
-        # Handle case where VAE BN stats have more channels than latents (e.g., due to different model versions)
-        bn_mean = self.vae.bn.running_mean[:init_latents.shape[1]].view(1, -1, 1, 1).to(device=device, dtype=dtype)
-        bn_std = torch.sqrt(
-            self.vae.bn.running_var[:init_latents.shape[1]].view(1, -1, 1, 1).to(dtype=torch.float32) + 1e-5
-        ).to(device=device, dtype=dtype)
-        init_latents = (init_latents - bn_mean) / bn_std
-        
-        # 4. Add noise based on strength
-        # Turbo models use very few steps, so we map strength to steps
-        timesteps_to_run = int(num_inference_steps * strength)
-        if timesteps_to_run < 1: timesteps_to_run = 1
-        
-        # Sigmas for flow matching: 1.0 (noise) -> 0.0 (clean)
-        # For img2img, we start at sigma = strength
-        # Ensure we use float32 for scheduler compatibility to avoid BFloat16 issues
-        sigmas = torch.linspace(strength, 0.0, timesteps_to_run + 1, dtype=torch.float32, device=device)
-        # Convert to numpy array for scheduler to avoid tensor type issues
-        sigmas_np = sigmas[:-1].cpu().numpy()
-        self.scheduler.set_timesteps(sigmas=sigmas_np, device=device)
-        
-        noise = randn_tensor(init_latents.shape, generator=generator, device=device, dtype=dtype)
-        latents = (1.0 - strength) * init_latents + strength * noise
-
-        # 5. Denoising loop
-        cfg_text_hiddens = list(uncond_text_hiddens) + list(text_hiddens) if self.do_classifier_free_guidance else text_hiddens
-        text_bth, text_lens = self._pad_text(
-            text_hiddens=cfg_text_hiddens, device=device, dtype=dtype, text_in_dim=self.transformer.config.text_in_dim
-        )
-
-        for i, t in enumerate(self.scheduler.timesteps):
-            latent_model_input = torch.cat([latents, latents], dim=0) if self.do_classifier_free_guidance else latents
-            t_batch = torch.full((latent_model_input.shape[0],), t.to(dtype=torch.float32).item(), device=device, dtype=dtype)
-
-            pred = self.transformer(
-                hidden_states=latent_model_input,
-                timestep=t_batch,
-                text_bth=text_bth,
-                text_lens=text_lens,
-                return_dict=False,
-            )[0]
-
-            if self.do_classifier_free_guidance:
-                pred_uncond, pred_cond = pred.chunk(2, dim=0)
-                pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-
-            latents = self.scheduler.step(pred, t, latents).prev_sample
-
-        # 6. Post-process
-        if output_type == "latent":
-            return latents
-
-        # Unnormalize and Unpatchify
-        latents = latents * bn_std + bn_mean
-        latents = self._unpatchify_latents(latents)
-        
-        # vae.decode is patched to run on CPU/fp32; result is a CPU tensor.
-        images = self.vae.decode(latents, return_dict=False)[0]
-        images = (images.clamp(-1, 1) + 1) / 2
-        images = images.permute(0, 2, 3, 1).float().cpu().numpy()
-
-        if output_type == "pil":
-            images = [Image.fromarray((img * 255).astype("uint8")) for img in images]
-
-        return ErnieImagePipelineOutput(images=images, revised_prompts=None)
-
-
 # ── Image Generator ──────────────────────────────────────────────────────────
 class ImageGenerator:
-    """Generates comic panel images using SDXL Lightning (4-step)."""
+    """Generates comic panel images using SDXL + Lightning + IP-Adapter Plus.
+
+    The character-consistency strategy is:
+      1. Generate a master reference image (text2img, IP-Adapter scale=0).
+      2. For each panel, pass that reference as ip_adapter_image and let
+         the prompt drive the scene. The IP-Adapter biases the cross-
+         attention layers toward the reference's character/style without
+         eating denoising-budget the way img2img would.
+    """
 
     def __init__(self, model_id: str = IMAGE_MODEL_ID):
         self.model_id = model_id
@@ -514,21 +406,43 @@ class ImageGenerator:
         self._lock = threading.Lock()
 
     def load(self):
-        """Load the image model into GPU memory (with VAE pinned to CPU)."""
+        """Load SDXL + Lightning LoRA + IP-Adapter Plus, with VAE on CPU."""
         if self.pipe is not None:
             return
 
-        logger.info(f"Loading image model: {self.model_id}")
+        from diffusers import StableDiffusionXLPipeline, EulerDiscreteScheduler
+        from huggingface_hub import hf_hub_download
 
-        self.pipe = ErnieImageImg2ImgPipeline.from_pretrained(
+        logger.info(f"Loading SDXL base: {self.model_id}")
+        self.pipe = StableDiffusionXLPipeline.from_pretrained(
             self.model_id,
             torch_dtype=DTYPE,
+            variant="fp16",
+            use_safetensors=True,
         ).to(DEVICE)
 
-        # Pin the VAE to CPU. End-of-generation VAE convs were hanging
-        # the amdgpu ring on gfx1151 and resetting the GPU (which kills
-        # both this process and the host compositor). VAE tiling/slicing
-        # only reduce the probability — running on CPU eliminates it.
+        logger.info("Loading SDXL-Lightning 4-step LoRA...")
+        lora_path = hf_hub_download(LIGHTNING_LORA_REPO, LIGHTNING_LORA_FILE)
+        self.pipe.load_lora_weights(lora_path)
+        self.pipe.fuse_lora()
+
+        # SDXL-Lightning was trained against this scheduler config;
+        # defaults will produce blurry / oversaturated results.
+        self.pipe.scheduler = EulerDiscreteScheduler.from_config(
+            self.pipe.scheduler.config, timestep_spacing="trailing"
+        )
+
+        logger.info("Loading IP-Adapter Plus (sdxl_models)...")
+        self.pipe.load_ip_adapter(
+            IP_ADAPTER_REPO,
+            subfolder=IP_ADAPTER_SUBFOLDER,
+            weight_name=IP_ADAPTER_WEIGHT,
+        )
+        # Default to 0 — generate() flips this on per-call when a
+        # reference image is supplied.
+        self.pipe.set_ip_adapter_scale(0.0)
+
+        # gfx1151 stability — see _patch_vae_for_cpu_execution.
         self.pipe.vae = _patch_vae_for_cpu_execution(self.pipe.vae)
         logger.info("VAE pinned to CPU/fp32 for gfx1151 stability.")
 
@@ -537,7 +451,7 @@ class ImageGenerator:
         except Exception as e:
             logger.warning(f"Attention slicing not available: {e}")
 
-        logger.info("ERNIE-Image-Turbo loaded.")
+        logger.info("SDXL + Lightning + IP-Adapter Plus loaded.")
 
 
     def generate(
@@ -545,12 +459,23 @@ class ImageGenerator:
         prompt: str,
         width: int = 1024,
         height: int = 1024,
-        steps: int = 8,
-        guidance: float = 1.0,
-        init_image: Optional[Image.Image] = None,
-        strength: float = 0.6,
+        steps: int = PANEL_INFERENCE_STEPS,
+        guidance: float = 0.0,
+        reference_image: Optional[Image.Image] = None,
+        ip_scale: float = IP_ADAPTER_SCALE,
     ) -> Image.Image:
-        """Generate an image from a text prompt, optionally using an init image for consistency."""
+        """Generate an image from a text prompt.
+
+        If reference_image is supplied, IP-Adapter conditions the cross-
+        attention on its embeddings (this is what carries character
+        consistency across panels). Otherwise IP-Adapter scale is set to
+        0 and we get pure text2img — that's the path used to build the
+        master reference itself.
+
+        guidance defaults to 0 because SDXL-Lightning was distilled
+        without classifier-free guidance; setting it >1 produces over-
+        saturated, broken outputs.
+        """
         import gc
 
         with self._lock:
@@ -565,20 +490,22 @@ class ImageGenerator:
 
             seed = int.from_bytes(os.urandom(4), "big")
 
+            if reference_image is not None:
+                self.pipe.set_ip_adapter_scale(ip_scale)
+                ip_kwargs = {"ip_adapter_image": reference_image}
+            else:
+                self.pipe.set_ip_adapter_scale(0.0)
+                ip_kwargs = {}
+
             with torch.inference_mode():
                 result = self.pipe(
                     prompt=prompt,
-                    image=init_image,
-                    strength=strength,
                     width=width,
                     height=height,
                     num_inference_steps=steps,
                     guidance_scale=guidance,
                     generator=torch.Generator(device=DEVICE).manual_seed(seed),
-                    # ERNIE's prompt-enhancer is a separate LLM that
-                    # piles more pressure onto the GPU. Keeping it off
-                    # is one less moving part on flaky hardware.
-                    use_pe=False,
+                    **ip_kwargs,
                 )
             logger.info(f"Image generation complete for prompt: {prompt[:50]}...")
 
@@ -704,23 +631,36 @@ def _draw_wrapped_text(
 
 
 # ── Generation Orchestrator ──────────────────────────────────────────────────
-# Strength used for every panel's img2img against the master reference.
-# At 0.75 the latents start as 0.25*init + 0.75*noise and run ~6 denoising
-# steps (out of 8 turbo steps), which is high enough that the prompt drives
-# the actual scene composition but low enough that the master ref's style
-# and character likenesses bleed through.
-PANEL_IMG2IMG_STRENGTH = 0.75
-
-
 def _panel_gen_dims(panel_index: int) -> tuple[int, int]:
-    """Return (width, height) the image model should generate for a panel."""
+    """Return (width, height) the image model should generate for a panel.
+
+    SDXL was trained on (multiples of) 64-pixel buckets — keeping the
+    output dims aligned avoids resize artefacts inside the VAE.
+    """
     rects = compute_panel_rects()
     pw, ph = rects[panel_index][2], rects[panel_index][3]
     img_h = ph - CAPTION_H
     aspect = pw / img_h
-    gen_w = (int(PANEL_GEN_SIZE * aspect) // 16) * 16  # ERNIE needs /16
-    gen_h = (PANEL_GEN_SIZE // 16) * 16
+    gen_w = (int(PANEL_GEN_SIZE * aspect) // 64) * 64
+    gen_h = (PANEL_GEN_SIZE // 64) * 64
     return gen_w, gen_h
+
+
+def _panel_prompt(story: ComicStory, panel: Panel) -> str:
+    """Build the image prompt for a single panel.
+
+    The IP-Adapter handles character identity from the master reference,
+    so the prompt focuses on style and scene. We keep the prompt short
+    and front-load the most important content because SDXL's text
+    encoders truncate at 77 tokens each.
+    """
+    chars_focus = ""
+    if panel.characters:
+        chars_focus = f" Featuring {', '.join(panel.characters)}."
+    return (
+        f"{story.art_style}. Scene: {panel.image_prompt}.{chars_focus} "
+        f"Children's book illustration, friendly, vivid colors."
+    )
 
 
 def generate_master_reference(
@@ -729,18 +669,14 @@ def generate_master_reference(
 ) -> Image.Image:
     """Generate the hidden master character reference image.
 
-    The previous design anchored every panel on the first generated panel,
-    which (a) caused panels to look like duplicates and (b) had no anchor
-    for characters introduced in panel 2+ (e.g., aliens landing later).
-    The master reference is a single illustration drawn from the full
-    character_bible — every character of the story is present from the
-    start. Each panel then runs img2img against it so identities stay
-    consistent regardless of when the character first appears in the plot.
+    The reference is text2img only (IP-Adapter scale = 0 inside generate
+    when reference_image is None) and shows every character described in
+    the character_bible standing together in a neutral scene. It is then
+    used as the IP-Adapter conditioning image for every panel, which is
+    what gives us cross-panel character consistency.
 
     The reference is not added to the rendered comic page.
     """
-    # Match panel 0's aspect so the latent shapes line up cleanly when used
-    # as init_image for any panel.
     gen_w, gen_h = _panel_gen_dims(0)
 
     prompt = (
@@ -756,10 +692,7 @@ def generate_master_reference(
         prompt=prompt,
         width=gen_w,
         height=gen_h,
-        steps=8,
-        guidance=1.0,
-        init_image=None,
-        strength=1.0,
+        reference_image=None,
     )
     story.master_reference = img
     logger.info("Master reference ready.")
@@ -771,24 +704,26 @@ def generate_all_panels(
     img_gen: ImageGenerator,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ):
-    """Generate images for all panels in a story."""
-    total = len(story.panels)
+    """Generate images for all panels in a story.
 
+    A single master reference is generated up front; every panel then
+    runs text2img with that reference passed through IP-Adapter so
+    characters stay recognisable across panels.
+    """
     if story.master_reference is None:
         generate_master_reference(story, img_gen)
 
+    total = len(story.panels)
     for panel in story.panels:
         gen_w, gen_h = _panel_gen_dims(panel.index)
-        full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
-
+        full_prompt = _panel_prompt(story, panel)
         logger.info(f"Generating panel {panel.index + 1}/{total}: {full_prompt[:80]}...")
 
         panel.image = img_gen.generate(
             prompt=full_prompt,
             width=gen_w,
             height=gen_h,
-            init_image=story.master_reference,
-            strength=PANEL_IMG2IMG_STRENGTH,
+            reference_image=story.master_reference,
         )
 
         if progress_callback:
@@ -808,19 +743,19 @@ def regenerate_panel(
     if modification:
         panel.image_prompt = panel.image_prompt + ". " + modification
 
-    full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {panel.image_prompt}."
-    logger.info(f"Regenerating panel {panel_index + 1}: {full_prompt[:80]}...")
-
-    # Lazily build the master reference if a panel is being regenerated on a
-    # legacy story that doesn't have one yet.
+    # Build the master reference lazily for stories that don't have one yet
+    # (e.g., regenerating a panel from a story generated under an older code
+    # path).
     if story.master_reference is None:
         generate_master_reference(story, img_gen)
+
+    full_prompt = _panel_prompt(story, panel)
+    logger.info(f"Regenerating panel {panel_index + 1}: {full_prompt[:80]}...")
 
     panel.image = img_gen.generate(
         prompt=full_prompt,
         width=gen_w,
         height=gen_h,
-        init_image=story.master_reference,
-        strength=PANEL_IMG2IMG_STRENGTH,
+        reference_image=story.master_reference,
     )
     return panel.image

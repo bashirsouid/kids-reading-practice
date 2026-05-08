@@ -268,45 +268,36 @@ async def process_job(job: ComicJob):
     logger.info(f"Story generated: {story.title} ({len(story.panels)} panels)")
     await broadcast_job_update(job)
 
-    # Step 3: Generate panel images
+    # Step 3: Generate panel images.
+    # First a hidden master reference image of all characters together;
+    # each panel is then text2img with that reference passed through
+    # IP-Adapter for cross-panel character consistency.
     job.status = JobStatus.GENERATING_PANELS
     job.progress_current = 0
     job.progress_total = len(story.panels)
     await broadcast_job_update(job)
 
-    # Step 3a: Generate the hidden master character reference. Every panel
-    # is then img2img'd against this so style and character identity stay
-    # consistent — even for characters that don't appear until later panels.
-    from generator import generate_master_reference, PANEL_IMG2IMG_STRENGTH
-
-    def gen_master():
-        generate_master_reference(story, img_gen)
+    from generator import (
+        _panel_prompt,
+        _panel_gen_dims,
+        generate_master_reference,
+    )
 
     logger.info(f"Job {job.job_id}: generating master character reference...")
     log_system_resources(f"JOB-{job.job_id}-MASTER-REF")
-    await loop.run_in_executor(None, gen_master)
+    await loop.run_in_executor(None, generate_master_reference, story, img_gen)
     # Breather between successive GPU jobs (helps the WM stay responsive).
     await asyncio.sleep(1.0)
 
-    # Step 3b: Generate each panel using the master reference as init.
     for panel in story.panels:
         log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
         def generate_single_panel(p=panel):
-            from generator import compute_panel_rects, PANEL_GEN_SIZE, CAPTION_H
-            rects = compute_panel_rects()
-            pw, ph = rects[p.index][2], rects[p.index][3]
-            img_h = ph - CAPTION_H
-            aspect = pw / img_h
-            gen_w = (int(PANEL_GEN_SIZE * aspect) // 16) * 16
-            gen_h = (PANEL_GEN_SIZE // 16) * 16
-            full_prompt = f"{story.art_style}. {story.character_bible}. Scene: {p.image_prompt}."
-
+            gen_w, gen_h = _panel_gen_dims(p.index)
             p.image = img_gen.generate(
-                prompt=full_prompt,
+                prompt=_panel_prompt(story, p),
                 width=gen_w,
                 height=gen_h,
-                init_image=story.master_reference,
-                strength=PANEL_IMG2IMG_STRENGTH,
+                reference_image=story.master_reference,
             )
 
         await loop.run_in_executor(None, generate_single_panel)
@@ -643,6 +634,25 @@ async def get_panel_image(job_id: str, panel_index: int):
     panel.image.convert("RGB").save(buf, format="JPEG", quality=90)
     buf.seek(0)
 
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
+@app.get("/api/master-reference/{job_id}")
+async def get_master_reference(job_id: str):
+    """Inspect the hidden master character-reference image for a job.
+
+    Useful for debugging character consistency: if panels look wrong,
+    check whether the reference itself is what you expected.
+    """
+    job = jobs.get(job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.story.master_reference:
+        raise HTTPException(status_code=404, detail="Master reference not generated yet")
+
+    buf = io.BytesIO()
+    job.story.master_reference.convert("RGB").save(buf, format="JPEG", quality=90)
+    buf.seek(0)
     return StreamingResponse(buf, media_type="image/jpeg")
 
 
