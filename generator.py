@@ -49,7 +49,10 @@ IP_ADAPTER_WEIGHT = "ip-adapter-plus_sdxl_vit-h.safetensors"
 # 0.6 leaves enough headroom for the prompt to drive scene composition
 # while keeping characters recognisable across panels.
 IP_ADAPTER_SCALE = 0.6
-PANEL_INFERENCE_STEPS = 4
+PANEL_INFERENCE_STEPS = 8
+
+# LIGHTNING_LORA_REPO = "ByteDance/SDXL-Lightning"
+# LIGHTNING_LORA_FILE = "sdxl_lightning_4step_lora.safetensors"
 
 # Qwen2.5-3B-Instruct: ~3x faster than 7B on this GPU, still strong at the
 # 6-panel structured story task. The 7B variant was overkill for the work
@@ -174,15 +177,20 @@ class TextGenerator:
             else:
                 return generated.strip()
 
-    def generate_story(self, synopsis: str, max_retries: int = 3) -> ComicStory:
+    def generate_story(self, synopsis: str, max_retries: int = 5) -> ComicStory:
         """Generate a complete comic story structure with retry logic."""
         prompt = _build_story_prompt(synopsis)
         for attempt in range(max_retries):
             try:
-                raw = self.generate(prompt)
-                return _parse_story_text(raw, synopsis)
+                raw = self.generate(prompt, max_tokens=2000)
+                raw_trimmed = raw[:500] + "..." if len(raw) > 500 else raw
+                result = _parse_story_text(raw, synopsis)
+                logger.info(f"Story generation succeeded on attempt {attempt + 1}. Panels: {len(result.panels)}")
+                return result
             except (KeyError, ValueError) as e:
+                raw_short = raw[:800] + "..." if len(raw) > 800 else raw
                 logger.warning(f"Story generation attempt {attempt + 1} failed: {e}")
+                logger.warning(f"Raw output: {raw_short}")
                 if attempt == max_retries - 1:
                     raise ValueError(
                         f"Failed to generate valid story after {max_retries} attempts: {e}"
@@ -215,6 +223,7 @@ class TextGenerator:
             out = self.pipe(
                 messages,
                 max_new_tokens=200,
+                max_length=200,
                 do_sample=True,
                 temperature=0.8,
                 return_full_text=False,
@@ -327,6 +336,7 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
         characters = [c.strip() for c in re.split(r"[,;]\s*", chars_raw) if c.strip()]
 
         if not scene or not caption:
+            logger.debug(f"Panel {idx_1based} dropped: scene={'yes' if scene else 'NO'}, caption={'yes' if caption else 'NO'}")
             # An incomplete panel block — drop it, the retry loop will handle it.
             continue
 
@@ -406,12 +416,11 @@ class ImageGenerator:
         self._lock = threading.Lock()
 
     def load(self):
-        """Load SDXL + Lightning LoRA + IP-Adapter Plus, with VAE on CPU."""
+        """Load SDXL + IP-Adapter Plus, with VAE on CPU."""
         if self.pipe is not None:
             return
 
-        from diffusers import StableDiffusionXLPipeline, EulerDiscreteScheduler
-        from huggingface_hub import hf_hub_download
+        from diffusers import StableDiffusionXLPipeline
 
         logger.info(f"Loading SDXL base: {self.model_id}")
         self.pipe = StableDiffusionXLPipeline.from_pretrained(
@@ -421,17 +430,11 @@ class ImageGenerator:
             use_safetensors=True,
         ).to(DEVICE)
 
-        logger.info("Loading SDXL-Lightning 4-step LoRA...")
-        lora_path = hf_hub_download(LIGHTNING_LORA_REPO, LIGHTNING_LORA_FILE)
-        self.pipe.load_lora_weights(lora_path)
-        self.pipe.fuse_lora()
-
-        # SDXL-Lightning was trained against this scheduler config;
-        # defaults will produce blurry / oversaturated results.
-        self.pipe.scheduler = EulerDiscreteScheduler.from_config(
-            self.pipe.scheduler.config, timestep_spacing="trailing"
-        )
-
+        # SDXL-Lightning LoRA is incompatible with IP-Adapter. The LoRA
+        # modifies the UNet's cross-attention and embedding projections
+        # so dimensions no longer match IP-Adapter's internal image_proj
+        # layers. IP-Adapter is required for cross-panel character
+        # consistency, so we omit the LoRA and use more steps for speed.
         logger.info("Loading IP-Adapter Plus (sdxl_models)...")
         self.pipe.load_ip_adapter(
             IP_ADAPTER_REPO,
@@ -451,7 +454,7 @@ class ImageGenerator:
         except Exception as e:
             logger.warning(f"Attention slicing not available: {e}")
 
-        logger.info("SDXL + Lightning + IP-Adapter Plus loaded.")
+        logger.info("SDXL + IP-Adapter Plus loaded.")
 
 
     def generate(
@@ -490,9 +493,18 @@ class ImageGenerator:
 
             seed = int.from_bytes(os.urandom(4), "big")
 
+            ip_adapter_loaded = (
+                self.pipe.unet.encoder_hid_proj is not None
+                and getattr(self.pipe.unet.config, "encoder_hid_dim_type", None) == "ip_image_proj"
+            )
+
             if reference_image is not None:
                 self.pipe.set_ip_adapter_scale(ip_scale)
-                ip_kwargs = {"ip_adapter_image": reference_image}
+                ip_kwargs = {"ip_adapter_image": [reference_image]}
+            elif ip_adapter_loaded:
+                self.pipe.set_ip_adapter_scale(0.0)
+                dummy_image = Image.new("RGB", (224, 224), (0, 0, 0))
+                ip_kwargs = {"ip_adapter_image": [dummy_image]}
             else:
                 self.pipe.set_ip_adapter_scale(0.0)
                 ip_kwargs = {}
