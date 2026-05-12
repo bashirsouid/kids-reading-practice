@@ -71,6 +71,14 @@ class Panel:
     caption: str
     characters: list[str] = field(default_factory=list)
     image: Optional[Image.Image] = None
+    is_placeholder: bool = False
+
+
+@dataclass
+class Character:
+    """Represents a character extracted from the character bible."""
+    name: str
+    description: str = ""
 
 
 @dataclass
@@ -86,6 +94,7 @@ class ComicStory:
     # characters that don't appear until later in the plot. Not rendered
     # in the final comic page.
     master_reference: Optional[Image.Image] = None
+    characters: list[Character] = field(default_factory=list)
 
 
 # ── Random Story Themes ──────────────────────────────────────────────────────
@@ -298,6 +307,47 @@ _HEADER_FIELD_RE = re.compile(
 )
 
 
+def _auto_detect_characters(character_bible: str) -> list:
+    """Extract character names and descriptions from character bible text.
+    
+    Parses the character bible and returns a list of Character objects.
+    Uses simple heuristics to find character name + description pairs.
+    """
+    if not character_bible:
+        return []
+    
+    characters = []
+    
+    # Try to split by common sentence patterns
+    # Pattern 1: "Name is a description" or "Name is an description"
+    # Pattern 2: "Name, description"
+    import re
+    
+    # Split into segments - look for patterns like "Name is..." or "Name, ..."
+    segments = re.split(r'(?<=[.!?])\s+(?=[A-Z])', character_bible)
+    
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+            
+        # Look for "Name is a/an/the..." pattern
+        m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|was)\s+(?:a|an|the)?\s*(.+)$', segment, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip()
+            desc = m.group(2).strip()
+            characters.append(Character(name=name, description=desc))
+        else:
+            # Fallback: first capitalized word as name, rest as description
+            words = segment.split()
+            if words and words[0][0].isupper() and len(words) > 1:
+                name = words[0]
+                desc = ' '.join(words[1:])[:100]  # Limit description length
+                characters.append(Character(name=name, description=desc))
+    
+    return characters
+
+
 def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
     """Parse the labeled plain-text comic format into a ComicStory."""
     text = raw.strip()
@@ -354,12 +404,17 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
 
     panels.sort(key=lambda p: p.index)
 
+    # Auto-detect characters from character_bible
+    character_bible = headers.get("CHARACTER_BIBLE", "")
+    characters = _auto_detect_characters(character_bible)
+
     return ComicStory(
         title=headers.get("TITLE", "Untitled").strip() or "Untitled",
         synopsis=synopsis,
         art_style=headers.get("ART_STYLE", "children's book illustration"),
-        character_bible=headers.get("CHARACTER_BIBLE", ""),
+        character_bible=character_bible,
         panels=panels,
+        characters=characters,
     )
 
 

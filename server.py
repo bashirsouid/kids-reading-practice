@@ -10,7 +10,10 @@ import io
 import json
 import logging
 import os
+import re
 import sys
+import time
+import uuid
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
@@ -134,10 +137,13 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 # ── Global State ─────────────────────────────────────────────────────────────
+# ── Enum Definitions ─────────────────────────────────────────────────────────
 class JobStatus(str, Enum):
     QUEUED = "queued"
     GENERATING_SYNOPSIS = "generating_synopsis"
     GENERATING_STORY = "generating_story"
+    GENERATING_REFERENCE = "generating_reference"
+    PANEL_BREAKDOWN = "panel_breakdown"
     GENERATING_PANELS = "generating_panels"
     COMPLETE = "complete"
     ERROR = "error"
@@ -155,6 +161,10 @@ class ComicJob:
     progress_total: int = 6
     error: Optional[str] = None
     panel_thumbnails: dict = field(default_factory=dict)  # panel_index -> base64
+    slug: str = ""  # URL-friendly project name
+    cancel_requested: bool = False
+    stage: str = "input"  # input, synopsis, story, reference, panel_breakdown, panels, complete, error
+    wait_for_user: bool = False  # Pause and wait for user to click "Next"
 
 
 # In-memory job store
@@ -190,6 +200,41 @@ class UpdateCaptionRequest(BaseModel):
 class UpdateTitleRequest(BaseModel):
     job_id: str
     title: str
+
+
+class UpdateSynopsisRequest(BaseModel):
+    job_id: str
+    synopsis: str
+
+
+class UpdateArtStyleRequest(BaseModel):
+    job_id: str
+    art_style: str
+
+
+class GenerateSynopsisRequest(BaseModel):
+    full_story: str
+
+
+class ProceedToNextStageRequest(BaseModel):
+    job_id: str
+
+
+class UpdatePanelRequest(BaseModel):
+    job_id: str
+    panel_index: int
+    caption: Optional[str] = None
+    image_prompt: Optional[str] = None
+
+
+class UpdatePanelsRequest(BaseModel):
+    job_id: str
+    panels: list[dict]  # List of panel objects with index, caption, image_prompt, characters, is_placeholder
+
+
+class UpdateCharacterRequest(BaseModel):
+    job_id: str
+    character_bible: str
 
 
 # ── Run ──────────────────────────────────────────────────────────────────────
@@ -240,84 +285,227 @@ async def job_worker():
 
 
 async def process_job(job: ComicJob):
-    """Process a single comic generation job."""
+    """Process a single comic generation job.
+    
+    Workflow:
+    1. Synopsis generation (for random/themed modes) or wait for user input (custom mode)
+    2. Story structure generation (with panels created)
+    3. WAIT for user to proceed to style/reference
+    4. Style/reference generation
+    5. WAIT for user to proceed to panel breakdown
+    6. Panel breakdown (allow editing)
+    7. Panel image generation
+    """
     logger.info(f"--- START PROCESSING JOB {job.job_id} ---")
     log_system_resources(f"JOB-{job.job_id}-START")
     loop = asyncio.get_event_loop()
 
-    # Step 1: Generate synopsis (for random/themed modes)
-    if job.mode in ("random", "themed"):
-        job.status = JobStatus.GENERATING_SYNOPSIS
+    try:
+        # ========================================
+        # STEP 1: Generate synopsis (random/themed modes) or wait for user (custom mode)
+        # ========================================
+        if job.mode in ("random", "themed"):
+            job.stage = "synopsis"
+            job.status = JobStatus.GENERATING_SYNOPSIS
+            job.progress_current = 0
+            job.progress_total = 1
+            await broadcast_job_update(job)
+
+            theme = job.input_text if job.mode == "themed" else None
+            synopsis = await loop.run_in_executor(
+                None, text_gen.generate_random_synopsis, theme
+            )
+            job.input_text = synopsis
+            logger.info(f"Generated synopsis: {synopsis}")
+        
+        # For custom mode, synopsis is the input text itself
+        if job.mode == "custom":
+            job.stage = "synopsis"
+            job.status = JobStatus.GENERATING_SYNOPSIS
+            job.progress_current = 0
+            job.progress_total = 1
+            await broadcast_job_update(job)
+            # Story text becomes the synopsis for custom mode
+            logger.info(f"Using custom input as synopsis")
+        
+        # For fullstory mode, extract synopsis from the full story text
+        if job.mode == "fullstory":
+            job.stage = "synopsis"
+            job.status = JobStatus.GENERATING_SYNOPSIS
+            job.progress_current = 0
+            job.progress_total = 1
+            await broadcast_job_update(job)
+            
+            prompt = (
+                f"Extract a brief, fun children's comic book synopsis (2-3 sentences) "
+                f"from this full story text. Focus on the main characters, setting, and conflict. "
+                f"Respond with ONLY the synopsis text, nothing else.\n\n"
+                f"Story text:\n{job.input_text}"
+            )
+            synopsis = await loop.run_in_executor(
+                None, lambda: text_gen.generate(prompt, max_tokens=200)
+            )
+            job.input_text = synopsis
+            logger.info(f"Extracted synopsis from full story: {synopsis}")
+
+        # ========================================
+        # STEP 2: Generate story structure (with panels)
+        # ========================================
+        job.stage = "story"
+        job.status = JobStatus.GENERATING_STORY
+        # Use 1/1 for story generation (one atomic step), not 0/6
+        job.progress_current = 0
+        job.progress_total = 1
         await broadcast_job_update(job)
 
-        theme = job.input_text if job.mode == "themed" else None
-        synopsis = await loop.run_in_executor(
-            None, text_gen.generate_random_synopsis, theme
+        story = await loop.run_in_executor(
+            None, text_gen.generate_story, job.input_text
         )
-        job.input_text = synopsis
-        logger.info(f"Generated synopsis: {synopsis}")
-
-    # Step 2: Generate story structure
-    job.status = JobStatus.GENERATING_STORY
-    await broadcast_job_update(job)
-
-    story = await loop.run_in_executor(
-        None, text_gen.generate_story, job.input_text
-    )
-    job.story = story
-    logger.info(f"Story generated: {story.title} ({len(story.panels)} panels)")
-    await broadcast_job_update(job)
-
-    # Step 3: Generate panel images.
-    # First a hidden master reference image of all characters together;
-    # each panel is then text2img with that reference passed through
-    # IP-Adapter for cross-panel character consistency.
-    job.status = JobStatus.GENERATING_PANELS
-    job.progress_current = 0
-    job.progress_total = len(story.panels)
-    await broadcast_job_update(job)
-
-    from generator import (
-        _panel_prompt,
-        _panel_gen_dims,
-        generate_master_reference,
-    )
-
-    logger.info(f"Job {job.job_id}: generating master character reference...")
-    log_system_resources(f"JOB-{job.job_id}-MASTER-REF")
-    await loop.run_in_executor(None, generate_master_reference, story, img_gen)
-    # Breather between successive GPU jobs (helps the WM stay responsive).
-    await asyncio.sleep(1.0)
-
-    for panel in story.panels:
-        log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
-        def generate_single_panel(p=panel):
-            gen_w, gen_h = _panel_gen_dims(p.index)
-            p.image = img_gen.generate(
-                prompt=_panel_prompt(story, p),
-                width=gen_w,
-                height=gen_h,
-                reference_image=story.master_reference,
-            )
-
-        await loop.run_in_executor(None, generate_single_panel)
-        job.progress_current = panel.index + 1
-
-        # Give the GPU and Window Manager some room to breathe
-        await asyncio.sleep(1.0)
-
-        # Generate thumbnail for WebSocket preview
-        if panel.image:
-            job.panel_thumbnails[panel.index] = _image_to_base64(
-                panel.image, max_size=256
-            )
-
+        job.story = story
+        # Generate slug from title for URL-friendly access
+        job.slug = _make_slug(story.title)
+        logger.info(f"Story generated: {story.title} ({len(story.panels)} panels)")
         await broadcast_job_update(job)
 
-    # Step 4: Done
-    job.status = JobStatus.COMPLETE
-    await broadcast_job_update(job)
-    logger.info(f"Job {job.job_id} complete: {story.title}")
+        # ========================================
+        # STEP 3: WAIT for user to proceed to style/reference
+        # ========================================
+        job.stage = "reference"
+        job.status = JobStatus.GENERATING_REFERENCE
+        job.wait_for_user = True
+        await broadcast_job_update(job)
+
+        # Wait for user to signal they want to proceed
+        while job.wait_for_user and not job.cancel_requested:
+            await asyncio.sleep(0.5)
+            await broadcast_job_update(job)
+
+        if job.cancel_requested:
+            job.status = JobStatus.ERROR
+            job.error = "Generation cancelled by user"
+            await broadcast_job_update(job)
+            return
+
+        job.wait_for_user = False
+
+        # ========================================
+        # STEP 4: Generate master reference image
+        # ========================================
+        job.stage = "reference"
+        job.status = JobStatus.GENERATING_REFERENCE
+        job.progress_current = 0
+        job.progress_total = 1
+        await broadcast_job_update(job)
+
+        from generator import (
+            _panel_prompt,
+            _panel_gen_dims,
+            generate_master_reference,
+        )
+
+        logger.info(f"Job {job.job_id}: generating master character reference...")
+        log_system_resources(f"JOB-{job.job_id}-MASTER-REF")
+        # Unload IP-Adapter if loaded from a previous job
+        img_gen.unload_ip_adapter()
+        await loop.run_in_executor(None, generate_master_reference, story, img_gen)
+        # Load IP-Adapter after master reference is generated
+        img_gen.load_ip_adapter()
+        # Breather between successive GPU jobs
+        await asyncio.sleep(0.5)
+
+        # Update progress to show reference complete
+        job.progress_current = 1
+        await broadcast_job_update(job)
+
+        # ========================================
+        # STEP 5: WAIT for user to proceed to panel breakdown
+        # ========================================
+        job.stage = "panel_breakdown"
+        job.status = JobStatus.PANEL_BREAKDOWN
+        job.wait_for_user = True
+        await broadcast_job_update(job)
+
+        # Wait for user to signal they want to proceed
+        while job.wait_for_user and not job.cancel_requested:
+            await asyncio.sleep(0.5)
+            await broadcast_job_update(job)
+
+        if job.cancel_requested:
+            job.status = JobStatus.ERROR
+            job.error = "Generation cancelled by user"
+            await broadcast_job_update(job)
+            return
+
+        job.wait_for_user = False
+
+        # ========================================
+        # STEP 6: Panel breakdown (editable stage)
+        # ========================================
+        # The story already has panels at this point - user may have edited them
+        # Just update the stage and let user know we're ready for panel generation
+        job.stage = "panels"
+        await broadcast_job_update(job)
+
+        # ========================================
+        # STEP 7: Generate panel images
+        # ========================================
+        # Only count non-placeholder panels for progress
+        real_panels = [p for p in story.panels if not p.is_placeholder]
+        job.progress_total = len(real_panels)
+        job.progress_current = 0
+        job.status = JobStatus.GENERATING_PANELS
+        await broadcast_job_update(job)
+
+        for panel in story.panels:
+            # Skip placeholder panels - they need user input before generating images
+            if panel.is_placeholder:
+                logger.info(f"Skipping placeholder panel {panel.index + 1}")
+                continue
+            
+            # Check for cancel request
+            if job.cancel_requested:
+                job.status = JobStatus.ERROR
+                job.error = "Generation cancelled by user"
+                await broadcast_job_update(job)
+                logger.info(f"Job {job.job_id} cancelled by user")
+                return
+
+            log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
+            def generate_single_panel(p=panel):
+                gen_w, gen_h = _panel_gen_dims(p.index)
+                p.image = img_gen.generate(
+                    prompt=_panel_prompt(story, p),
+                    width=gen_w,
+                    height=gen_h,
+                    reference_image=story.master_reference,
+                )
+
+            await loop.run_in_executor(None, generate_single_panel)
+            job.progress_current += 1
+
+            # Brief breather between GPU jobs
+            await asyncio.sleep(0.5)
+
+            # Generate thumbnail for WebSocket preview
+            if panel.image:
+                job.panel_thumbnails[panel.index] = _image_to_base64(
+                    panel.image, max_size=256
+                )
+
+            await broadcast_job_update(job)
+
+        # Step 4: Done
+        job.stage = "complete"
+        job.status = JobStatus.COMPLETE
+        await broadcast_job_update(job)
+        logger.info(f"Job {job.job_id} complete: {story.title}")
+
+    except Exception as e:
+        logger.error(f"Job {job.job_id} failed: {e}", exc_info=True)
+        job.status = JobStatus.ERROR
+        job.error = str(e)
+        job.wait_for_user = False
+        await broadcast_job_update(job)
 
 
 def _image_to_base64(img, max_size: int = 512) -> str:
@@ -338,25 +526,33 @@ async def broadcast_job_update(job: ComicJob):
     """Send job status update to all connected WebSocket clients."""
     data = {
         "job_id": job.job_id,
+        "slug": job.slug,
         "status": job.status.value,
+        "stage": job.stage,
         "mode": job.mode,
         "synopsis": job.input_text,
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,
         "error": job.error,
         "queue_position": _get_queue_position(job.job_id),
+        "wait_for_user": job.wait_for_user,
+        "has_reference": job.story.master_reference is not None if job.story else False,
     }
     if job.story:
         data["story"] = {
             "title": job.story.title,
+            "synopsis": job.story.synopsis,
             "art_style": job.story.art_style,
             "character_bible": job.story.character_bible,
+            "characters": [{"name": c.name, "description": c.description} for c in job.story.characters],
             "panels": [
                 {
                     "index": p.index,
                     "caption": p.caption,
                     "image_prompt": p.image_prompt,
+                    "characters": p.characters,
                     "has_image": p.image is not None,
+                    "is_placeholder": p.is_placeholder,
                 }
                 for p in job.story.panels
             ],
@@ -380,11 +576,19 @@ async def broadcast_job_update(job: ComicJob):
 
 def _get_queue_position(job_id: str) -> int:
     """Get the position of a job in the queue (0 = currently processing)."""
-    # Check if the job is currently being processed
     queued_ids = list(job_queue._queue)
     if job_id in queued_ids:
         return queued_ids.index(job_id) + 1
     return 0
+
+
+def _make_slug(title: str) -> str:
+    """Convert a title to a URL-friendly slug."""
+    slug = title.lower()
+    slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+    slug = re.sub(r'\s+', '-', slug)
+    slug = slug.strip('-')
+    return slug[:50] if slug else str(uuid.uuid4())[:8]
 
 
 # ── API Routes ───────────────────────────────────────────────────────────────
@@ -395,6 +599,18 @@ async def serve_index():
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Frontend not found")
     return index_path.read_text()
+
+
+@app.get("/project", response_class=HTMLResponse)
+async def serve_project_no_slug():
+    """Redirect /project to create page."""
+    return await serve_index()
+
+
+@app.get("/project/{slug}", response_class=HTMLResponse)
+async def serve_project(slug: str):
+    """Serve SPA for project by slug — frontend handles routing."""
+    return await serve_index()
 
 
 @app.get("/api/health")
@@ -409,37 +625,75 @@ async def health_check():
     }
 
 
-@app.post("/api/generate")
-async def generate_comic(req: GenerateRequest):
-    """Submit a new comic generation job."""
-    if not models_loaded:
-        raise HTTPException(status_code=503, detail="Models are still loading. Please wait.")
+@app.get("/api/recent")
+async def list_recent_jobs():
+    """List recently completed jobs for the home page."""
+    recent = sorted(
+        [j for j in jobs.values() if j.status == JobStatus.COMPLETE],
+        key=lambda j: j.created_at,
+        reverse=True
+    )[:10]
+    return [
+        {
+            "job_id": j.job_id,
+            "slug": j.slug,
+            "title": j.story.title if j.story else "Untitled",
+            "created_at": j.created_at,
+            "mode": j.mode,
+        }
+        for j in recent
+    ]
 
-    if req.mode not in ("random", "themed", "custom"):
-        raise HTTPException(status_code=400, detail="Mode must be 'random', 'themed', or 'custom'")
 
-    if req.mode == "custom" and not req.text.strip():
-        raise HTTPException(status_code=400, detail="Custom mode requires story text")
+@app.get("/project/{slug}")
+async def get_job_by_slug(slug: str):
+    """Redirect to index for SPA routing by slug."""
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend not found")
+    return index_path.read_text()
 
-    if req.mode == "themed" and not req.text.strip():
-        raise HTTPException(status_code=400, detail="Themed mode requires a theme")
 
-    job_id = str(uuid.uuid4())[:8]
-    job = ComicJob(
-        job_id=job_id,
-        status=JobStatus.QUEUED,
-        mode=req.mode,
-        input_text=req.text.strip(),
-        created_at=time.time(),
-    )
-    jobs[job_id] = job
-    await job_queue.put(job_id)
-
-    return {
-        "job_id": job_id,
+@app.get("/api/status/slug/{slug}")
+async def get_job_status_by_slug(slug: str):
+    """Get job status by slug."""
+    job = next((j for j in jobs.values() if j.slug == slug), None)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    result = {
+        "job_id": job.job_id,
+        "slug": job.slug,
         "status": job.status.value,
-        "queue_position": job_queue.qsize(),
+        "stage": job.stage,
+        "mode": job.mode,
+        "synopsis": job.input_text,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
+        "error": job.error,
+        "queue_position": _get_queue_position(job.job_id),
+        "wait_for_user": job.wait_for_user,
+        "has_reference": job.story.master_reference is not None if job.story else False,
     }
+    if job.story:
+        result["story"] = {
+            "title": job.story.title,
+            "synopsis": job.story.synopsis,
+            "art_style": job.story.art_style,
+            "character_bible": job.story.character_bible,
+            "characters": [{"name": c.name, "description": c.description} for c in job.story.characters],
+            "panels": [
+                {
+                    "index": p.index,
+                    "caption": p.caption,
+                    "image_prompt": p.image_prompt,
+                    "characters": p.characters,
+                    "has_image": p.image is not None,
+                    "is_placeholder": p.is_placeholder,
+                }
+                for p in job.story.panels
+            ],
+        }
+    return result
 
 
 @app.get("/api/status/{job_id}")
@@ -451,19 +705,34 @@ async def get_job_status(job_id: str):
 
     result = {
         "job_id": job.job_id,
+        "slug": job.slug,
         "status": job.status.value,
+        "stage": job.stage,
         "mode": job.mode,
         "synopsis": job.input_text,
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,
         "error": job.error,
         "queue_position": _get_queue_position(job.job_id),
+        "wait_for_user": job.wait_for_user,
+        "has_reference": job.story.master_reference is not None if job.story else False,
     }
     if job.story:
         result["story"] = {
             "title": job.story.title,
+            "synopsis": job.story.synopsis,
+            "art_style": job.story.art_style,
+            "character_bible": job.story.character_bible,
+            "characters": [{"name": c.name, "description": c.description} for c in job.story.characters],
             "panels": [
-                {"index": p.index, "caption": p.caption, "has_image": p.image is not None}
+                {
+                    "index": p.index,
+                    "caption": p.caption,
+                    "image_prompt": p.image_prompt,
+                    "characters": p.characters,
+                    "has_image": p.image is not None,
+                    "is_placeholder": p.is_placeholder,
+                }
                 for p in job.story.panels
             ],
         }
@@ -501,6 +770,36 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
         ws_list = active_websockets.get(job_id, [])
         if websocket in ws_list:
             ws_list.remove(websocket)
+
+
+@app.post("/api/generate")
+async def api_generate(req: GenerateRequest):
+    """Start a new comic generation job."""
+    if not models_loaded:
+        raise HTTPException(status_code=503, detail="Models still loading")
+
+    job_id = str(uuid.uuid4())
+    job = ComicJob(
+        job_id=job_id,
+        status=JobStatus.QUEUED,
+        mode=req.mode,
+        input_text=req.text,
+        created_at=time.time(),
+    )
+    jobs[job_id] = job
+    job_queue.put_nowait(job_id)
+    logger.info(f"New job created: {job_id} (mode={req.mode})")
+    return {"job_id": job_id}
+
+
+@app.post("/api/cancel/{job_id}")
+async def api_cancel(job_id: str):
+    """Request cancellation of a running job."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job.cancel_requested = True
+    return {"status": "cancelled"}
 
 
 @app.post("/api/regenerate-panel")
@@ -559,6 +858,179 @@ async def api_update_title(req: UpdateTitleRequest):
 
     job.story.title = req.title
     return {"status": "ok"}
+
+
+@app.post("/api/update-synopsis")
+async def api_update_synopsis(req: UpdateSynopsisRequest):
+    """Update the comic synopsis."""
+    job = jobs.get(req.job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job.story.synopsis = req.synopsis
+    return {"status": "ok"}
+
+
+@app.post("/api/update-art-style")
+async def api_update_art_style(req: UpdateArtStyleRequest):
+    """Update the art style for a job."""
+    job = jobs.get(req.job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job.story.art_style = req.art_style
+    return {"status": "ok"}
+
+
+@app.post("/api/generate-synopsis")
+async def api_generate_synopsis(req: GenerateSynopsisRequest):
+    """Extract synopsis from full story text (for full story mode/custom mode)."""
+    if not models_loaded:
+        raise HTTPException(status_code=503, detail="Models still loading")
+
+    loop = asyncio.get_event_loop()
+    
+    prompt = (
+        f"Extract a brief, fun children's comic book synopsis (2-3 sentences) "
+        f"from this full story text. Focus on the main characters, setting, and conflict. "
+        f"Respond with ONLY the synopsis text, nothing else.\n\n"
+        f"Story text:\n{req.full_story}"
+    )
+    
+    synopsis = await loop.run_in_executor(
+        None,
+        lambda: text_gen.generate(prompt, max_tokens=200)
+    )
+    
+    return {"synopsis": synopsis}
+
+
+@app.post("/api/generate-panel-breakdown/{job_id}")
+async def api_generate_panel_breakdown(job_id: str):
+    """Break synopsis into 6 panels (for panel breakdown step).
+    
+    This regenerates the panel breakdown for an existing job's synopsis.
+    Useful when the user wants to redo the panel structure.
+    """
+    if not models_loaded:
+        raise HTTPException(status_code=503, detail="Models still loading")
+
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    loop = asyncio.get_event_loop()
+    
+    # Regenerate story with panels from current synopsis/input_text
+    story = await loop.run_in_executor(
+        None, text_gen.generate_story, job.input_text
+    )
+    job.story = story
+    job.slug = _make_slug(story.title)
+    
+    await broadcast_job_update(job)
+    return {"status": "ok", "panels": len(story.panels)}
+
+
+@app.post("/api/proceed/{job_id}")
+async def api_proceed_to_next_stage(job_id: str):
+    """Signal the job to proceed to the next stage (user clicked 'Next')."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job.wait_for_user = False
+    logger.info(f"Job {job_id}: user requested to proceed from stage '{job.stage}'")
+    return {"status": "ok", "stage": job.stage}
+
+
+@app.post("/api/update-panel")
+async def api_update_panel(req: UpdatePanelRequest):
+    """Update individual panel content (caption or image_prompt)."""
+    job = jobs.get(req.job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if req.panel_index < 0 or req.panel_index >= len(job.story.panels):
+        raise HTTPException(status_code=400, detail="Invalid panel index")
+
+    panel = job.story.panels[req.panel_index]
+    if req.caption is not None:
+        panel.caption = req.caption
+    if req.image_prompt is not None:
+        panel.image_prompt = req.image_prompt
+    
+    # Clear placeholder flag if panel has real content (not just placeholders)
+    if panel.is_placeholder:
+        # Check if the content is no longer placeholder text
+        is_still_placeholder = (
+            (not panel.caption or panel.caption.startswith("[Placeholder")) or
+            (not panel.image_prompt or panel.image_prompt.startswith("[Placeholder"))
+        )
+        if not is_still_placeholder:
+            panel.is_placeholder = False
+            logger.info(f"Cleared placeholder flag for panel {req.panel_index + 1}")
+    
+    return {"status": "ok", "panel_index": req.panel_index}
+
+
+@app.post("/api/update-panels")
+async def api_update_panels(req: UpdatePanelsRequest):
+    """Update all panels at once (used when saving panel breakdown edits)."""
+    job = jobs.get(req.job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    for panel_data in req.panels:
+        idx = panel_data.get("index")
+        if idx is None or idx < 0 or idx >= len(job.story.panels):
+            continue
+        
+        panel = job.story.panels[idx]
+        if "caption" in panel_data:
+            panel.caption = panel_data["caption"]
+        if "image_prompt" in panel_data:
+            panel.image_prompt = panel_data["image_prompt"]
+        if "characters" in panel_data:
+            panel.characters = panel_data["characters"]
+        if "is_placeholder" in panel_data:
+            panel.is_placeholder = panel_data["is_placeholder"]
+        else:
+            # Auto-detect if panel is still placeholder based on content
+            is_still_placeholder = (
+                (not panel.caption or panel.caption.startswith("[Placeholder")) or
+                (not panel.image_prompt or panel.image_prompt.startswith("[Placeholder"))
+            )
+            panel.is_placeholder = is_still_placeholder
+    
+    logger.info(f"Updated {len(req.panels)} panels for job {req.job_id}")
+    return {"status": "ok", "panels_updated": len(req.panels)}
+
+
+@app.post("/api/update-character")
+async def api_update_character(req: UpdateCharacterRequest):
+    """Update character descriptions for reference generation."""
+    job = jobs.get(req.job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job.story.character_bible = req.character_bible
+    return {"status": "ok"}
+
+
+@app.get("/api/master-reference/{slug}")
+async def get_master_reference_by_slug(slug: str):
+    """Get the master reference image by slug."""
+    job = next((j for j in jobs.values() if j.slug == slug), None)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.story.master_reference:
+        raise HTTPException(status_code=404, detail="Master reference not generated yet")
+
+    buf = io.BytesIO()
+    job.story.master_reference.convert("RGB").save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
 
 
 @app.get("/api/export/{job_id}")
