@@ -321,7 +321,7 @@ Do not output markdown. Do not add any commentary before or after.
 
 TITLE: <story title on one line>
 
-ART_STYLE: <one short sentence describing the visual style, e.g. "bright colorful children's book illustration, clean lines, friendly characters">
+ART_STYLE: <one short sentence describing the visual style, e.g. "modern 3D animation style, cinematic lighting, high detail">
 
 CHARACTER_BIBLE: <one paragraph describing EVERY character that appears in ANY panel of this story, including characters introduced in later panels (e.g., aliens that show up only in panel 3 or 4). For each character cover: species/type, body shape, dominant colors and markings, distinctive features, clothing/accessories.>
 
@@ -354,7 +354,7 @@ Do not output markdown. Do not add panels, scenes, captions, or commentary.
 
 TITLE: <story title on one line>
 
-ART_STYLE: <one short sentence describing the visual style, e.g. "bright colorful children's book illustration, clean lines, friendly characters">
+ART_STYLE: <one short sentence describing the visual style, e.g. "modern 3D animation style, cinematic lighting, high detail">
 
 CHARACTER_BIBLE: <one paragraph describing EVERY important character likely to appear in this story. For each character cover: species/type, body shape, dominant colors and markings, distinctive features, clothing/accessories.>"""
 
@@ -525,7 +525,7 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
     return ComicStory(
         title=headers.get("TITLE", "Untitled").strip() or "Untitled",
         synopsis=synopsis,
-        art_style=headers.get("ART_STYLE", "children's book illustration"),
+        art_style=headers.get("ART_STYLE", "modern 3D animation style"),
         character_bible=character_bible,
         panels=panels,
         characters=characters,
@@ -554,7 +554,7 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
     return ComicStory(
         title=headers.get("TITLE", fallback_title).strip() or fallback_title,
         synopsis=synopsis,
-        art_style=headers.get("ART_STYLE", "children's book illustration"),
+        art_style=headers.get("ART_STYLE", "modern 3D animation style"),
         character_bible=character_bible,
         panels=[],
         characters=characters,
@@ -883,8 +883,7 @@ def _panel_prompt(story: ComicStory, panel: Panel) -> str:
     if panel.characters:
         chars_focus = f" Featuring {', '.join(panel.characters)}."
     return (
-        f"{story.art_style}. Scene: {panel.image_prompt}.{chars_focus} "
-        f"Children's book illustration, friendly, vivid colors."
+        f"{story.art_style}. Scene: {panel.image_prompt}.{chars_focus}"
     )
 
 

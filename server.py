@@ -1059,6 +1059,7 @@ async def api_update_art_style(req: UpdateArtStyleRequest):
     if not job or not job.story:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    logger.info(f"Updating art style for job {req.job_id} to: {req.art_style}")
     job.story.art_style = req.art_style
     save_jobs()
     return {"status": "ok"}

@@ -12,7 +12,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generateMasterReference } from '../services/api';
+import { proceedToNextStage, generateMasterReference, updateArtStyle } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
 import { CharacterList } from '../components/character/CharacterList';
@@ -58,13 +58,18 @@ export function StyleReferencePage() {
     },
   });
 
-  const handleStyleSelect = (style: string) => {
+  const handleStyleSelect = async (style: string) => {
     setArtStyle(style);
     if (state.jobId && state.story) {
       dispatch({
         type: 'UPDATE_STORY_FIELD',
         payload: { field: 'art_style', value: style }
       });
+      try {
+        await updateArtStyle(state.jobId, style);
+      } catch (err) {
+        console.error('Failed to update art style', err);
+      }
     }
   };
 
@@ -73,6 +78,7 @@ export function StyleReferencePage() {
     setIsGeneratingRef(true);
     setError(null);
     try {
+      await updateArtStyle(state.jobId, artStyle);
       await generateMasterReference(state.jobId);
       // WebSocket onReferenceReady will update state
     } catch (err) {
