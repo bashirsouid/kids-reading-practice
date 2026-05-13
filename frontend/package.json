@@ -1,0 +1,42 @@
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "description": "AI Comic Generator React Frontend",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "lint": "eslint src --ext .ts,.tsx",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-router-dom": "^7.15.0"
+  },
+  "devDependencies": {
+    "@headlessui/react": "^2.2.10",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/jest": "^30.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "@vitest/coverage-v8": "^0.34.6",
+    "autoprefixer": "^10.5.0",
+    "jest-websocket-mock": "^2.5.0",
+    "jsdom": "^24.0.0",
+    "msw": "^2.14.6",
+    "postcss": "^8.5.14",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^6.0.3",
+    "vite": "^5.4.21",
+    "vitest": "^0.34.6"
+  }
+}

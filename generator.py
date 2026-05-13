@@ -207,19 +207,23 @@ class TextGenerator:
         raise ValueError("Story generation failed")
 
     def generate_random_synopsis(self, theme: Optional[str] = None) -> str:
-        """Generate a random story synopsis, optionally themed."""
+        """Generate a longer random story synopsis (5-8 sentences).
+        
+        This synopsis provides a clear situation/setup, a conflict/action, and a brief resolution,
+        making it suitable for splitting into six comic panels.
+        """
         if theme:
             prompt = (
-                f"Generate a brief, fun children's comic book synopsis (2-3 sentences) "
-                f"about the theme: '{theme}'. "
+                f"Generate a fun children's comic book synopsis (5-8 sentences) about the theme: '{theme}'. "
+                f"It should include a clear situation or setup, a conflict or action, and a short resolution. "
                 f"Respond with ONLY the synopsis text, nothing else."
             )
         else:
-            # Pick a random base theme and ask the LLM to embellish
+            # Pick a random base theme and ask the LLM to elaborate into a mini-story
             base = random.choice(RANDOM_THEMES)
             prompt = (
-                f"Expand this into a brief, fun children's comic book synopsis (2-3 sentences): "
-                f"'{base}'. "
+                f"Expand this into a fun children's comic book synopsis (5-8 sentences): '{base}'. "
+                f"Make sure it has a clear situation/setup, a conflict/action, and a brief resolution. "
                 f"Respond with ONLY the synopsis text, nothing else."
             )
         
@@ -231,8 +235,8 @@ class TextGenerator:
             ]
             out = self.pipe(
                 messages,
-                max_new_tokens=200,
-                max_length=200,
+                max_new_tokens=500,
+                max_length=500,
                 do_sample=True,
                 temperature=0.8,
                 return_full_text=False,
@@ -312,11 +316,19 @@ def _auto_detect_characters(character_bible: str) -> list:
     
     Parses the character bible and returns a list of Character objects.
     Uses simple heuristics to find character name + description pairs.
+    Filters out pronouns and non-name words.
     """
     if not character_bible:
         return []
     
     characters = []
+    
+    # Common English pronouns and non-name words to exclude
+    EXCLUDED_WORDS = {
+        'he', 'she', 'it', 'they', 'them', 'him', 'her', 'his', 'hers',
+        'its', 'their', 'theirs', 'this', 'that', 'these', 'those',
+        'what', 'which', 'who', 'whom', 'whose',
+    }
     
     # Try to split by common sentence patterns
     # Pattern 1: "Name is a description" or "Name is an description"
@@ -336,12 +348,33 @@ def _auto_detect_characters(character_bible: str) -> list:
         if m:
             name = m.group(1).strip()
             desc = m.group(2).strip()
+            
+            # Validate the name - must not be a pronoun or too short
+            name_lower = name.lower()
+            if name_lower in EXCLUDED_WORDS:
+                continue
+            if len(name) < 2:  # Minimum 2 characters
+                continue
+            # Single word names should be at least 3 chars and look like proper names
+            if ' ' not in name and len(name) < 3:
+                continue
+                
             characters.append(Character(name=name, description=desc))
         else:
             # Fallback: first capitalized word as name, rest as description
             words = segment.split()
             if words and words[0][0].isupper() and len(words) > 1:
                 name = words[0]
+                name_lower = name.lower()
+                
+                # Skip pronouns and short non-names
+                if name_lower in EXCLUDED_WORDS:
+                    continue
+                if len(name) < 2:
+                    continue
+                if ' ' not in name and len(name) < 3:
+                    continue
+                    
                 desc = ' '.join(words[1:])[:100]  # Limit description length
                 characters.append(Character(name=name, description=desc))
     
@@ -527,8 +560,9 @@ class ImageGenerator:
         If reference_image is supplied, IP-Adapter conditions the cross-
         attention on its embeddings (this is what carries character
         consistency across panels). Otherwise IP-Adapter scale is set to
-        0 and we get pure text2img — that's the path used to build the
-        master reference itself.
+        0 and a dummy black image is passed to satisfy IP-Adapter's
+        requirement for image_embeds in the UNet config. This gives us
+        pure text2img — the path used to build the master reference itself.
 
         guidance defaults to 0 because SDXL-Lightning was distilled
         without classifier-free guidance; setting it >1 produces over-
@@ -554,13 +588,21 @@ class ImageGenerator:
             )
 
             if reference_image is not None:
+                # Use the provided reference image with the desired IP‑Adapter scale
                 self.pipe.set_ip_adapter_scale(ip_scale)
                 ip_kwargs = {"ip_adapter_image": [reference_image]}
             elif ip_adapter_loaded:
+                # When generating the master reference (reference_image is None) we still need
+                # to satisfy the IP‑Adapter's requirement for an image embedding. Provide a
+                # dummy black image of the target generation dimensions. The IP‑Adapter scale
+                # is set to 0.0 so the conditioning has no effect, but the presence of the
+                # image prevents a ValueError about missing ``image_embeds``.
+                dummy_image = Image.new("RGB", (width, height), (0, 0, 0))
                 self.pipe.set_ip_adapter_scale(0.0)
-                dummy_image = Image.new("RGB", (224, 224), (0, 0, 0))
                 ip_kwargs = {"ip_adapter_image": [dummy_image]}
+                logger.debug("Generated dummy black image for IP‑Adapter when reference_image is None")
             else:
+                # No IP‑Adapter loaded – normal text‑to‑image generation.
                 self.pipe.set_ip_adapter_scale(0.0)
                 ip_kwargs = {}
 

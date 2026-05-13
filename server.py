@@ -135,6 +135,9 @@ STATIC_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Mount static assets (JS/CSS) from React build
+app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
 
 # ── Global State ─────────────────────────────────────────────────────────────
 # ── Enum Definitions ─────────────────────────────────────────────────────────
@@ -337,23 +340,65 @@ async def process_job(job: ComicJob):
             await broadcast_job_update(job)
             
             prompt = (
-                f"Extract a brief, fun children's comic book synopsis (2-3 sentences) "
-                f"from this full story text. Focus on the main characters, setting, and conflict. "
+                f"Extract a fun children's comic book synopsis (5-8 sentences) "
+                f"from this full story text. Include a clear situation/setup, conflict/action, and a short resolution. "
+                f"Focus on the main characters, setting, and key events. "
                 f"Respond with ONLY the synopsis text, nothing else.\n\n"
                 f"Story text:\n{job.input_text}"
             )
             synopsis = await loop.run_in_executor(
-                None, lambda: text_gen.generate(prompt, max_tokens=200)
+                None, lambda: text_gen.generate(prompt, max_tokens=500)
             )
             job.input_text = synopsis
             logger.info(f"Extracted synopsis from full story: {synopsis}")
 
         # ========================================
-        # STEP 2: Generate story structure (with panels)
+        # STEP 2: Show synopsis for user confirmation (NO panels yet)
         # ========================================
         job.stage = "story"
         job.status = JobStatus.GENERATING_STORY
-        # Use 1/1 for story generation (one atomic step), not 0/6
+        job.progress_current = 1
+        job.progress_total = 1
+        
+        # Create a minimal story object with synopsis (no panels yet)
+        from generator import ComicStory
+        job.story = ComicStory(
+            title="",  # Will be generated later
+            synopsis=job.input_text,
+            art_style="",  # Will be generated later
+            character_bible="",  # Will be generated later
+            panels=[],  # No panels yet - waiting for confirmation
+        )
+        
+        await broadcast_job_update(job)
+        logger.info(f"Synopsis generated, waiting for user confirmation")
+
+        # ========================================
+        # STEP 2b: WAIT for user to confirm synopsis before generating panels
+        # ========================================
+        job.stage = "synopsis_confirmation"
+        job.status = JobStatus.GENERATING_STORY
+        job.wait_for_user = True
+        await broadcast_job_update(job)
+
+        # Wait for user to confirm the synopsis
+        while job.wait_for_user and not job.cancel_requested:
+            await asyncio.sleep(0.5)
+            await broadcast_job_update(job)
+
+        if job.cancel_requested:
+            job.status = JobStatus.ERROR
+            job.error = "Generation cancelled by user"
+            await broadcast_job_update(job)
+            return
+
+        job.wait_for_user = False
+
+        # ========================================
+        # STEP 2c: Generate story structure (with panels) AFTER synopsis confirmation
+        # ========================================
+        job.stage = "story"
+        job.status = JobStatus.GENERATING_STORY
         job.progress_current = 0
         job.progress_total = 1
         await broadcast_job_update(job)
@@ -405,17 +450,26 @@ async def process_job(job: ComicJob):
 
         logger.info(f"Job {job.job_id}: generating master character reference...")
         log_system_resources(f"JOB-{job.job_id}-MASTER-REF")
-        # Unload IP-Adapter if loaded from a previous job
-        img_gen.unload_ip_adapter()
-        await loop.run_in_executor(None, generate_master_reference, story, img_gen)
-        # Load IP-Adapter after master reference is generated
-        img_gen.load_ip_adapter()
-        # Breather between successive GPU jobs
-        await asyncio.sleep(0.5)
+        # The IP-Adapter is managed internally by ImageGenerator.generate()
+        # which sets the scale to 0 when reference_image is None (for master reference).
+        # Wrap the master reference generation in a try/except to handle errors gracefully.
+        try:
+            await loop.run_in_executor(None, generate_master_reference, story, img_gen)
+            # Breather between successive GPU jobs
+            await asyncio.sleep(0.5)
 
-        # Update progress to show reference complete
-        job.progress_current = 1
-        await broadcast_job_update(job)
+            # Update progress to show reference complete
+            job.progress_current = 1
+            await broadcast_job_update(job)
+        except Exception as e:
+            # Log the error and inform the frontend.
+            logger.error(f"Failed to generate master reference: {e}", exc_info=True)
+            job.status = JobStatus.ERROR
+            job.error = f"Failed to generate master reference: {e}"
+            job.wait_for_user = False
+            await broadcast_job_update(job)
+            # Abort further processing of this job.
+            return
 
         # ========================================
         # STEP 5: WAIT for user to proceed to panel breakdown
@@ -523,7 +577,13 @@ def _image_to_base64(img, max_size: int = 512) -> str:
 
 # ── WebSocket Broadcasting ───────────────────────────────────────────────────
 async def broadcast_job_update(job: ComicJob):
-    """Send job status update to all connected WebSocket clients."""
+    """Send job status update to all connected WebSocket clients.
+    The payload now includes a `type` field to indicate the nature of the update:
+    - "progress" for regular progress updates.
+    - "complete" when the master reference image is ready.
+    - "error" when an error occurs.
+    """
+    # Base data shared across all message types
     data = {
         "job_id": job.job_id,
         "slug": job.slug,
@@ -533,11 +593,26 @@ async def broadcast_job_update(job: ComicJob):
         "synopsis": job.input_text,
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,
-        "error": job.error,
         "queue_position": _get_queue_position(job.job_id),
         "wait_for_user": job.wait_for_user,
         "has_reference": job.story.master_reference is not None if job.story else False,
+        "error": job.error,
     }
+
+    # Determine message type based on job state
+    if job.error:
+        data["type"] = "error"
+        data["message"] = job.error
+    elif job.story and job.story.master_reference is not None:
+        data["type"] = "complete"
+        data["reference_ready"] = True
+    else:
+        data["type"] = "progress"
+        # include progress fields for UI updates
+        data["progress"] = job.progress_current
+        data["total"] = job.progress_total
+
+    # Include story details if available
     if job.story:
         data["story"] = {
             "title": job.story.title,
@@ -891,15 +966,16 @@ async def api_generate_synopsis(req: GenerateSynopsisRequest):
     loop = asyncio.get_event_loop()
     
     prompt = (
-        f"Extract a brief, fun children's comic book synopsis (2-3 sentences) "
-        f"from this full story text. Focus on the main characters, setting, and conflict. "
+        f"Extract a fun children's comic book synopsis (5-8 sentences) "
+        f"from this full story text. Include a clear situation/setup, conflict/action, and a short resolution. "
+        f"Focus on the main characters, setting, and key events. "
         f"Respond with ONLY the synopsis text, nothing else.\n\n"
         f"Story text:\n{req.full_story}"
     )
-    
+
     synopsis = await loop.run_in_executor(
         None,
-        lambda: text_gen.generate(prompt, max_tokens=200)
+        lambda: text_gen.generate(prompt, max_tokens=500)
     )
     
     return {"synopsis": synopsis}
@@ -932,12 +1008,125 @@ async def api_generate_panel_breakdown(job_id: str):
     return {"status": "ok", "panels": len(story.panels)}
 
 
+@app.post("/api/generate-panels/{job_id}")
+async def api_generate_panels(job_id: str):
+    """Generate panel images for a job that's at the panel stage.
+    
+    This endpoint triggers background generation of panel images for all
+    non-placeholder panels that don't have images yet.
+    """
+    global img_gen
+    
+    if not models_loaded:
+        raise HTTPException(status_code=503, detail="Models still loading")
+    
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if not job.story or not job.story.master_reference:
+        raise HTTPException(status_code=400, detail="Master reference not generated yet")
+    
+    # Check if already generating panels
+    if job.status == JobStatus.GENERATING_PANELS:
+        return {"status": "ok", "message": "Already generating panels"}
+    
+    # Queue panel generation as a background task
+    asyncio.create_task(_generate_panels_task(job))
+    
+    return {"status": "ok", "message": "Panel generation started"}
+
+
+async def _generate_panels_task(job: ComicJob):
+    """Background task to generate panel images."""
+    global img_gen
+    loop = asyncio.get_event_loop()
+    story = job.story
+    
+    try:
+        # Count non-placeholder panels that need images
+        panels_needing_images = [
+            p for p in story.panels 
+            if not p.is_placeholder and p.image is None
+        ]
+        
+        if not panels_needing_images:
+            job.stage = "complete"
+            job.status = JobStatus.COMPLETE
+            await broadcast_job_update(job)
+            return
+        
+        job.status = JobStatus.GENERATING_PANELS
+        job.progress_total = len(panels_needing_images)
+        job.progress_current = 0
+        await broadcast_job_update(job)
+        
+        from generator import (
+            _panel_prompt,
+            _panel_gen_dims,
+        )
+        
+        for panel in story.panels:
+            # Skip placeholder panels or panels that already have images
+            if panel.is_placeholder or panel.image is not None:
+                continue
+            
+            # Check for cancel request
+            if job.cancel_requested:
+                job.status = JobStatus.ERROR
+                job.error = "Generation cancelled by user"
+                await broadcast_job_update(job)
+                return
+            
+            log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
+            
+            def generate_single_panel(p=panel):
+                gen_w, gen_h = _panel_gen_dims(p.index)
+                p.image = img_gen.generate(
+                    prompt=_panel_prompt(story, p),
+                    width=gen_w,
+                    height=gen_h,
+                    reference_image=story.master_reference,
+                )
+            
+            await loop.run_in_executor(None, generate_single_panel)
+            job.progress_current += 1
+            
+            # Brief breather between GPU jobs
+            await asyncio.sleep(0.5)
+            
+            # Generate thumbnail for WebSocket preview
+            if panel.image:
+                job.panel_thumbnails[panel.index] = _image_to_base64(
+                    panel.image, max_size=256
+                )
+            
+            await broadcast_job_update(job)
+        
+        # All done
+        job.stage = "complete"
+        job.status = JobStatus.COMPLETE
+        await broadcast_job_update(job)
+        logger.info(f"Job {job.job_id} panel generation complete")
+        
+    except Exception as e:
+        logger.error(f"Panel generation failed for job {job.job_id}: {e}", exc_info=True)
+        job.status = JobStatus.ERROR
+        job.error = str(e)
+        await broadcast_job_update(job)
+
+
 @app.post("/api/proceed/{job_id}")
 async def api_proceed_to_next_stage(job_id: str):
     """Signal the job to proceed to the next stage (user clicked 'Next')."""
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Validate that master reference exists before proceeding past reference stage
+    if job.stage == "reference":
+        if not job.story or not job.story.master_reference:
+            raise HTTPException(status_code=400, detail="Master reference not generated successfully - cannot proceed to panel generation")
     
     job.wait_for_user = False
     logger.info(f"Job {job_id}: user requested to proceed from stage '{job.stage}'")
