@@ -56,13 +56,13 @@ describe('Card', () => {
 describe('ProgressBar', () => {
   it('renders with correct width', () => {
     render(<ProgressBar percent={50} />);
-    const progressBar = document.querySelector('.bg-gradient-to-r');
+    const progressBar = document.querySelector<HTMLElement>('.bg-gradient-to-r');
     expect(progressBar?.style.width).toBe('50%');
   });
 
   it('clamps values to 0-100', () => {
     const { rerender } = render(<ProgressBar percent={150} />);
-    const progressBar = document.querySelector('.bg-gradient-to-r');
+    const progressBar = document.querySelector<HTMLElement>('.bg-gradient-to-r');
     expect(progressBar?.style.width).toBe('100%');
 
     rerender(<ProgressBar percent={-10} />);

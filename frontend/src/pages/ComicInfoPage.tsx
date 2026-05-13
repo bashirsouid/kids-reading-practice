@@ -26,6 +26,8 @@ export function ComicInfoPage() {
   const [storyGenerated, setStoryGenerated] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const projectPath = (page: string, slug = state.slug) => slug ? `/${slug}/${page}` : `/${page}`;
+
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'comicInfo' });
   }, []);
@@ -56,7 +58,7 @@ export function ComicInfoPage() {
             dispatch({ type: 'SET_SLUG', payload: data.slug });
           }
           setStoryGenerated(true);
-          navigate('/storyContent');
+          navigate(projectPath('storyContent', data.slug || state.slug));
         }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
@@ -95,6 +97,10 @@ export function ComicInfoPage() {
       const result = await generateStory({ mode: state.mode, text });
       if (result.job_id) {
         dispatch({ type: 'SET_JOB_ID', payload: result.job_id });
+        if (result.slug) {
+          dispatch({ type: 'SET_SLUG', payload: result.slug });
+          window.history.replaceState(null, '', projectPath('comicInfo', result.slug));
+        }
         // Wait for story data via WebSocket before navigating
       }
     } catch (err) {
@@ -105,7 +111,7 @@ export function ComicInfoPage() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
+    <div className="max-w-5xl mx-auto">
       <div className="form-section">
         <div className="text-xs text-text-dim mb-3">Step 1: Comic Information</div>
         <h2 className="text-xl text-gold mb-3">📝 Create Your Comic</h2>

@@ -7,7 +7,7 @@
  * Used by: CharacterList
  */
 import React from 'react';
-import { Character } from '../../../types/wizard';
+import { Character } from '../../types/wizard';
 import { Button } from '../ui/Button';
 
 interface CharacterItemProps {

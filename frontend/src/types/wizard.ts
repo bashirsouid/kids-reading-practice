@@ -8,18 +8,20 @@ export interface Character {
 }
 
 export interface Panel {
-  characters?: string;
+  index?: number;
+  characters?: string | string[];
   image_prompt?: string;
   caption?: string;
   is_placeholder?: boolean;
   has_image?: boolean;
-  image?: string;
+  image?: string | null;
 }
 
 export interface Story {
   title?: string;
   synopsis?: string;
   art_style?: string;
+  character_bible?: string;
   master_reference?: string;
   reference_prompt?: string;
   characters?: Character[];

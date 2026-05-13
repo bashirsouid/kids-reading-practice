@@ -46,6 +46,7 @@ interface UseWebSocketOptions {
   onError?: (error: string) => void;
   onReferenceReady?: () => void;
   onStoryUpdate?: (story: WebSocketMessage['story']) => void;
+  onSlugUpdate?: (slug: string) => void;
   onStageChange?: (stage: string) => void;
 }
 
@@ -55,10 +56,33 @@ export function useWebSocket({
    onError,
    onReferenceReady,
    onStoryUpdate,
+   onSlugUpdate,
    onStageChange,
   }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  
+  // Use a ref to store callbacks so the connect function doesn't need to depend on them
+  const callbacksRef = useRef({
+    onProgress,
+    onError,
+    onReferenceReady,
+    onStoryUpdate,
+    onSlugUpdate,
+    onStageChange
+  });
+
+  // Keep the ref updated with the latest callbacks
+  useEffect(() => {
+    callbacksRef.current = {
+      onProgress,
+      onError,
+      onReferenceReady,
+      onStoryUpdate,
+      onSlugUpdate,
+      onStageChange
+    };
+  }, [onProgress, onError, onReferenceReady, onStoryUpdate, onSlugUpdate, onStageChange]);
 
   const connect = useCallback(() => {
     if (!jobId) return;
@@ -66,6 +90,7 @@ export function useWebSocket({
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/${jobId}`;
 
+    console.log(`Connecting to WebSocket: ${wsUrl}`);
     wsRef.current = new WebSocket(wsUrl);
 
     wsRef.current.onopen = () => {
@@ -75,26 +100,7 @@ export function useWebSocket({
     wsRef.current.onmessage = (event) => {
       try {
         const data: WebSocketMessage = JSON.parse(event.data);
-
-        // Handle legacy format with explicit type field
-        if (data.type) {
-          switch (data.type) {
-            case 'progress':
-              if (data.progress !== undefined && data.total !== undefined) {
-                onProgress?.(data.progress, data.total);
-              }
-              break;
-            case 'complete':
-              if (data.reference_ready && onReferenceReady) {
-                onReferenceReady();
-              }
-              break;
-            case 'error':
-              onError?.(data.message || 'Unknown error');
-              break;
-          }
-          return;
-        }
+        const { onProgress, onError, onReferenceReady, onStoryUpdate, onSlugUpdate, onStageChange } = callbacksRef.current;
 
         // Handle server format (from comic-server broadcast_job_update)
         // Check for error first
@@ -118,6 +124,11 @@ export function useWebSocket({
           onStageChange(data.stage);
         }
 
+        // Handle slug updates
+        if (data.slug && onSlugUpdate) {
+          onSlugUpdate(data.slug);
+        }
+
         // Handle story updates (when panels are generated)
         if (data.story && onStoryUpdate) {
           onStoryUpdate(data.story);
@@ -139,10 +150,11 @@ export function useWebSocket({
     };
 
     wsRef.current.onerror = () => {
-      onError?.('WebSocket connection error');
+      callbacksRef.current.onError?.('WebSocket connection error');
     };
 
     wsRef.current.onclose = () => {
+      console.log('WebSocket disconnected');
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
@@ -150,12 +162,13 @@ export function useWebSocket({
         connect();
       }, 3000);
     };
-  }, [jobId, onProgress, onError, onReferenceReady, onStoryUpdate, onStageChange]);
+  }, [jobId]);
 
   useEffect(() => {
     connect();
 
     return () => {
+      console.log('Cleaning up WebSocket');
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }

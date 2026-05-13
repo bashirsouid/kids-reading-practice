@@ -1,7 +1,7 @@
 /**
  * ReviewPage - Step 6: Final review with export options.
  * 
- * Purpose: Display final comic panels with export options (PNG/ZIP).
+ * Purpose: Display final comic panels with export options (PNG).
  * Provides navigation back to previous step for edits.
  * 
  * Route: /review
@@ -15,6 +15,7 @@ import { Button } from '../components/ui/Button';
 export function ReviewPage() {
   const navigate = useNavigate();
   const { state, dispatch } = useWizard();
+  const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'review' });
@@ -26,14 +27,10 @@ export function ReviewPage() {
     }
   };
 
-  const handleExportZIP = () => {
-    if (state.slug) {
-      window.open(`/api/export/${state.slug}`, '_blank');
-    }
-  };
+
 
   const handleBack = () => {
-    navigate('/panelImages');
+    navigate(projectPath('panelImages'));
   };
 
   return (
@@ -54,9 +51,6 @@ export function ReviewPage() {
           <Button variant="primary" onClick={handleExportPNG}>
             Export PNG
           </Button>
-          <Button variant="secondary" onClick={handleExportZIP}>
-            Export ZIP
-          </Button>
         </div>
 
         <Button variant="secondary" onClick={handleBack} className="w-full">
@@ -70,7 +64,7 @@ export function ReviewPage() {
           <span className="zoom-display">100%</span>
           <Button variant="secondary" size="sm">+</Button>
         </div>
-        {state.story?.panels && <PanelGrid panels={state.story.panels} />}
+        {state.story?.panels && <PanelGrid panels={state.story.panels} jobId={state.jobId} />}
       </div>
     </div>
   );

@@ -3,20 +3,19 @@
  * 
  * Purpose: Allow users to select art style and manage character descriptions.
  * Generates master reference image for character consistency across panels.
- * Proceeding advances job to "panel_breakdown" stage.
+ * Proceeding advances job to the panel breakdown step.
  * 
  * Route: /styleReference
  * 
- * Note: Reference is generated automatically when clicking Next.
+ * Note: Reference generation is explicit; Next is enabled after the reference exists.
  */
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage } from '../services/api';
+import { proceedToNextStage, generateMasterReference } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
 import { CharacterList } from '../components/character/CharacterList';
-import { PanelGrid } from '../components/panel/PanelGrid';
 import { Button } from '../components/ui/Button';
 import { Spinner } from '../components/ui/Spinner';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -34,6 +33,8 @@ export function StyleReferencePage() {
     !!state.story?.master_reference
   );
   const [error, setError] = useState<string | null>(null);
+
+  const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'styleReference' });
@@ -67,26 +68,28 @@ export function StyleReferencePage() {
     }
   };
 
-  const handleNext = async () => {
+  const handleGenerateReference = async () => {
     if (!state.jobId) return;
+    setIsGeneratingRef(true);
+    setError(null);
+    try {
+      await generateMasterReference(state.jobId);
+      // WebSocket onReferenceReady will update state
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to generate reference';
+      setError(errorMessage);
+      setIsGeneratingRef(false);
+    }
+  };
+
+  const handleNext = async () => {
+    if (!state.jobId || !hasReference) return;
     
-    if (!hasReference) {
-      // Trigger reference generation by proceeding from the reference stage
-      setIsGeneratingRef(true);
-      setError(null);
-      try {
-        await proceedToNextStage(state.jobId);
-        // Reference generation will happen, and WebSocket will notify us when ready
-        // The WebSocket onReferenceReady will set hasReference=true
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Failed to generate reference';
-        setError(errorMessage);
-        setIsGeneratingRef(false);
-      }
-    } else {
-      // Reference exists - the backend job is now at "panel_breakdown" stage waiting for user
-      // Just navigate - the user will proceed to panel generation from PanelBreakdownPage
-      navigate('/panelBreakdown');
+    try {
+      await proceedToNextStage(state.jobId);
+      navigate(projectPath('panelBreakdown'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to proceed');
     }
   };
 
@@ -105,7 +108,7 @@ export function StyleReferencePage() {
   };
 
   const handleBack = () => {
-    navigate('/storyContent');
+    navigate(projectPath('storyContent'));
   };
 
   return (
@@ -143,29 +146,42 @@ export function StyleReferencePage() {
               </div>
             )}
             {hasReference ? (
-              <img
-                src={`/api/master-reference/${state.slug}`}
-                alt="Reference"
-                className="max-w-full rounded-lg cursor-pointer mx-auto"
-                onError={(e) => {
-                  // If image fails to load, indicate that
-                  setHasReference(false);
-                  setError('Reference image failed to load. Please regenerate.');
-                }}
-              />
+              <div className="flex flex-col items-center">
+                <img
+                  src={`/api/master-reference/${state.slug}?t=${Date.now()}`}
+                  alt="Reference"
+                  className="max-w-full rounded-lg cursor-pointer mx-auto mb-3"
+                  onError={(e) => {
+                    // If image fails to load, indicate that
+                    setHasReference(false);
+                    setError('Reference image failed to load. Please regenerate.');
+                  }}
+                />
+                <Button 
+                  variant="secondary" 
+                  size="sm" 
+                  onClick={handleGenerateReference} 
+                  disabled={isGeneratingRef}
+                >
+                  {isGeneratingRef ? 'Regenerating...' : '🔄 Regenerate Reference'}
+                </Button>
+              </div>
             ) : (
               <div>
                 {isGeneratingRef && <Spinner className="mx-auto mb-3" />}
                 <p className="text-text-dim text-sm mb-3">
                   {isGeneratingRef
                     ? 'Generating reference image... This may take a minute.'
-                    : 'Click Next to generate the master reference image'
+                    : 'Click to generate the master reference image'
                   }
                 </p>
                 {!isGeneratingRef && (
-                  <p className="text-text-dim text-xs">
-                    The reference image ensures character consistency across all panels
-                  </p>
+                  <>
+                    <Button variant="primary" onClick={handleGenerateReference}>🖼️ Generate Reference Image</Button>
+                    <p className="text-text-dim text-xs mt-3">
+                      The reference image ensures character consistency across all panels
+                    </p>
+                  </>
                 )}
               </div>
             )}
@@ -175,21 +191,12 @@ export function StyleReferencePage() {
         <WizardNav
           onBack={handleBack}
           onNext={handleNext}
-          nextLabel={hasReference ? "Next: Panel Breakdown →" : "🖼️ Generate & Continue"}
-          nextDisabled={isGeneratingRef}
+          nextLabel="Next: Panel Breakdown →"
+          nextDisabled={!hasReference || isGeneratingRef}
         />
       </div>
 
-      <div>
-        <div className="zoom-controls">
-          <Button variant="secondary" size="sm">−</Button>
-          <span className="zoom-display">100%</span>
-          <Button variant="secondary" size="sm">+</Button>
-        </div>
-        {hasReference && state.story?.panels && (
-          <PanelGrid panels={state.story.panels} />
-        )}
-      </div>
+      <div />
     </div>
   );
 }

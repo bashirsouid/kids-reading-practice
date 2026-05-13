@@ -5,12 +5,11 @@
  * Users can edit character names, scene descriptions, and captions for each panel.
  * Proceeding advances job to "panels" stage.
  * 
- * Note: Panels are now generated automatically after synopsis confirmation in step 2.
- * This page allows editing/revising the panel content before image generation.
+ * Note: Panels are generated on this step, then edited/confirmed before image generation.
  * 
  * Route: /panelBreakdown
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
 import { generatePanelBreakdown, proceedToNextStage, updatePanels } from '../services/api';
@@ -22,7 +21,10 @@ export function PanelBreakdownPage() {
   const navigate = useNavigate();
   const { state, dispatch } = useWizard();
   const [panels, setPanels] = useState(state.story?.panels || []);
+  const [isGeneratingBreakdown, setIsGeneratingBreakdown] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const didRequestBreakdown = useRef(false);
+  const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
   // Sync panels from wizard state when story updates
   useEffect(() => {
@@ -35,15 +37,34 @@ export function PanelBreakdownPage() {
     dispatch({ type: 'SET_PAGE', payload: 'panelBreakdown' });
   }, []);
 
+  useEffect(() => {
+    if (!state.jobId || panels.length > 0 || didRequestBreakdown.current) return;
+    didRequestBreakdown.current = true;
+    handleRegenerate();
+  }, [state.jobId, panels.length]);
+
   const handleRegenerate = async () => {
     if (!state.jobId) return;
     setError(null);
+    setIsGeneratingBreakdown(true);
     try {
       const result = await generatePanelBreakdown(state.jobId);
-      setPanels(result.breakdown || []);
+      const breakdown = result.breakdown || [];
+      setPanels(breakdown);
+      if (state.story) {
+        dispatch({
+          type: 'SET_STORY',
+          payload: {
+            ...state.story,
+            panels: breakdown,
+          },
+        });
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to regenerate panel breakdown';
       setError(errorMessage);
+    } finally {
+      setIsGeneratingBreakdown(false);
     }
   };
 
@@ -62,7 +83,9 @@ export function PanelBreakdownPage() {
         index: idx,
         caption: p.caption,
         image_prompt: p.image_prompt,
-        characters: p.characters,
+        characters: Array.isArray(p.characters)
+          ? p.characters
+          : String(p.characters || '').split(',').map((name) => name.trim()).filter(Boolean),
         is_placeholder: p.is_placeholder,
       }));
       await updatePanels(state.jobId, panelsToUpdate);
@@ -74,16 +97,16 @@ export function PanelBreakdownPage() {
     
     // Proceed to panel image generation
     await proceedToNextStage(state.jobId);
-    navigate('/panelImages');
+    navigate(projectPath('panelImages'));
   };
 
   const handleBack = () => {
-    navigate('/styleReference');
+    navigate(projectPath('styleReference'));
   };
 
   return (
-    <div className="main-layout">
-      <div className="form-section">
+    <div className="flex justify-center">
+      <div className="form-section w-full max-w-8xl mt-10">
         <div className="text-xs text-text-dim mb-3">Step 4: Panel Breakdown</div>
         <h2 className="text-xl text-gold mb-4">📋 Panel Breakdown</h2>
 
@@ -94,15 +117,19 @@ export function PanelBreakdownPage() {
         {panels.length === 0 && (
           <div className="mb-4">
             <p className="text-text-dim text-sm mb-3">
-              No panels found. Click below to generate panel breakdown.
+              {isGeneratingBreakdown
+                ? 'Generating panel breakdown for review...'
+                : 'No panels found. Click below to generate panel breakdown.'}
             </p>
-            <Button
-              variant="primary"
-              className="w-full mb-3"
-              onClick={handleRegenerate}
-            >
-              📋 Generate Panel Breakdown
-            </Button>
+            {!isGeneratingBreakdown && (
+              <Button
+                variant="primary"
+                className="w-full mb-3"
+                onClick={handleRegenerate}
+              >
+                📋 Generate Panel Breakdown
+              </Button>
+            )}
           </div>
         )}
 
@@ -153,17 +180,9 @@ export function PanelBreakdownPage() {
         <WizardNav
           onBack={handleBack}
           onNext={handleNext}
-          nextLabel="Next: Generate Images →"
+          nextLabel="Confirm Breakdown & Generate Images →"
+          nextDisabled={panels.length === 0 || isGeneratingBreakdown}
         />
-      </div>
-
-      <div>
-        <div className="zoom-controls">
-          <Button variant="secondary" size="sm">−</Button>
-          <span className="zoom-display">100%</span>
-          <Button variant="secondary" size="sm">+</Button>
-        </div>
-        {/* Preview grid */}
       </div>
     </div>
   );

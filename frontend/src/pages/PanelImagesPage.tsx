@@ -12,7 +12,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generatePanels } from '../services/api';
+import { proceedToNextStage, generatePanels, getJobStatus } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { Button } from '../components/ui/Button';
 import { ProgressBar } from '../components/ui/ProgressBar';
@@ -27,6 +27,7 @@ export function PanelImagesPage() {
   const [progress, setProgress] = useState({ current: 0, total: 6 });
   const [error, setError] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
+  const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'panelImages' });
@@ -37,11 +38,25 @@ export function PanelImagesPage() {
     jobId: state.jobId || '',
     onProgress: (current, total) => {
       setProgress({ current, total });
+      if (total > 0 && current < total) {
+        setIsGenerating(true);
+      }
     },
-    onReferenceReady: () => {
-      // Panel generation complete
-      setIsGenerating(false);
-      setIsComplete(true);
+    onStoryUpdate: (storyUpdate) => {
+      if (!storyUpdate) return;
+      dispatch({
+        type: 'SET_STORY',
+        payload: {
+          ...(state.story || {}),
+          ...storyUpdate,
+        },
+      });
+    },
+    onStageChange: (stage) => {
+      if (stage === 'complete') {
+        setIsGenerating(false);
+        setIsComplete(true);
+      }
     },
     onError: (msg) => {
       setError(msg);
@@ -49,9 +64,62 @@ export function PanelImagesPage() {
     },
   });
 
+  useEffect(() => {
+    if (!state.jobId) return;
+
+    let cancelled = false;
+
+    const refreshStatus = async () => {
+      try {
+        const status = await getJobStatus(state.jobId!);
+        if (cancelled) return;
+
+        setProgress({
+          current: status.progress_current || 0,
+          total: status.progress_total || 6,
+        });
+
+        if (status.story) {
+          dispatch({
+            type: 'SET_STORY',
+            payload: {
+              ...(state.story || {}),
+              ...status.story,
+            },
+          });
+        }
+
+        if (status.status === 'generating_panels') {
+          setIsGenerating(true);
+        }
+
+        if (status.stage === 'complete') {
+          setIsGenerating(false);
+          setIsComplete(true);
+        }
+
+        if (status.error) {
+          setError(status.error);
+          setIsGenerating(false);
+        }
+      } catch {
+        // WebSocket remains the primary path; keep polling silent unless the explicit generate call fails.
+      }
+    };
+
+    refreshStatus();
+    const interval = window.setInterval(refreshStatus, isGenerating ? 2000 : 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [state.jobId, isGenerating]);
+
   const handleGenerate = async () => {
     if (!state.jobId) return;
     setIsGenerating(true);
+    setProgress({ current: 0, total: panels.filter(p => !p.is_placeholder && !p.has_image).length || 6 });
     setError(null);
     
     // Trigger panel generation using the dedicated endpoint
@@ -67,24 +135,25 @@ export function PanelImagesPage() {
 
   const panels = state.story?.panels || [];
   // Check for panels without images (missing = no image generated)
-  const panelsWithoutImages = panels.filter(p => !p.has_image).length;
+  const panelsWithoutImages = panels.filter(p => !p.is_placeholder && !p.has_image).length;
   const hasPlaceholders = panels.some(p => 
     p.is_placeholder || (p.caption && p.caption.startsWith('[Placeholder'))
   );
   
   // User can proceed to Review only when ALL 6 panels have images generated
   // and there are no placeholders that need editing
-  const allPanelsHaveImages = panels.length === 6 && panelsWithoutImages === 0;
+  const allPanelsHaveImages = panels.length === 6 && panelsWithoutImages === 0 && !hasPlaceholders;
+  const generatingPanelNumber = Math.min(progress.current + 1, progress.total || 1);
 
   const handleNext = async () => {
     if (state.jobId) {
       await proceedToNextStage(state.jobId);
     }
-    navigate('/review');
+    navigate(projectPath('review'));
   };
 
   const handleBack = () => {
-    navigate('/panelBreakdown');
+    navigate(projectPath('panelBreakdown'));
   };
 
   return (
@@ -114,17 +183,31 @@ export function PanelImagesPage() {
 
         {isGenerating && (
           <div className="mb-4">
-            <ProgressBar current={progress.current} total={progress.total} />
+            <ProgressBar percent={progress.total ? (progress.current / progress.total) * 100 : 0} />
             <p className="text-text-dim text-sm text-center mt-2">
-              Generating panel {progress.current} of {progress.total}...
+              {progress.current >= progress.total
+                ? 'Finishing panel generation...'
+                : `Generating panel ${generatingPanelNumber} of ${progress.total}...`}
             </p>
+            {progress.current > 0 && (
+              <p className="text-green-300 text-xs text-center mt-1">
+                {progress.current} panel{progress.current === 1 ? '' : 's'} ready
+              </p>
+            )}
           </div>
         )}
 
-{!isGenerating && panelsWithoutImages > 0 && !hasPlaceholders && (
+        {!isGenerating && isComplete && allPanelsHaveImages && (
+          <div className="bg-green-500/10 border border-green-500/40 rounded-lg p-3 mb-3">
+            <div className="font-semibold text-green-300 text-sm">All panel images are ready</div>
+            <p className="text-text-dim text-xs mt-1">You can continue to the final review.</p>
+          </div>
+        )}
+
+        {!isGenerating && panelsWithoutImages > 0 && !hasPlaceholders && (
           <div className="bg-accent/8 border-l-4 border-accent rounded-lg p-3 mb-3">
             <div className="font-semibold text-accent text-sm">{panelsWithoutImages} panel{panelsWithoutImages > 1 ? 's' : ''} need generation</div>
-            <p className="text-text-dim text-xs mt-1">{panels.filter(p => !p.has_image).map((p, i) => `# ${i + 1}`).join(', ')}</p>
+            <p className="text-text-dim text-xs mt-1">{panels.map((p, i) => !p.is_placeholder && !p.has_image ? `#${i + 1}` : null).filter(Boolean).join(', ')}</p>
             <Button variant="gold" size="sm" className="mt-2" onClick={handleGenerate}>
               📝 Generate Missing
             </Button>
@@ -140,12 +223,16 @@ export function PanelImagesPage() {
       </div>
 
       <div>
-        <div className="zoom-controls">
-          <Button variant="secondary" size="sm">−</Button>
-          <span className="zoom-display">100%</span>
-          <Button variant="secondary" size="sm">+</Button>
-        </div>
-        {panels.length > 0 && <PanelGrid panels={panels} />}
+        {panels.length > 0 && (
+          <>
+            <div className="zoom-controls">
+              <Button variant="secondary" size="sm">−</Button>
+              <span className="zoom-display">100%</span>
+              <Button variant="secondary" size="sm">+</Button>
+            </div>
+            <PanelGrid panels={panels} jobId={state.jobId} />
+          </>
+        )}
       </div>
     </div>
   );

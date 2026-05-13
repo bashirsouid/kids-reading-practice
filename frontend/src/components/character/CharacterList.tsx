@@ -7,7 +7,7 @@
  * Used by: StyleReferencePage
  */
 import React from 'react';
-import { Character } from '../../../types/wizard';
+import { Character } from '../../types/wizard';
 import { CharacterItem } from './CharacterItem';
 import { Button } from '../ui/Button';
 

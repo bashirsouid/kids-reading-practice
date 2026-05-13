@@ -2,8 +2,8 @@
  * StoryContentPage - Step 2: Edit the generated title and synopsis.
  *
  * Purpose: Allow users to review and edit the AI-generated story title and synopsis.
- * The user must confirm the synopsis BEFORE panels are generated.
- * Updates are saved on blur and proceeding triggers story generation with panels.
+ * The user must confirm the synopsis before reference metadata is generated.
+ * Panel breakdown is generated later on Step 4.
  *
  * UI Update: Form width increased to max-w-8xl (doubled) and synopsis textarea height
  * increased to 400px (doubled from 200px).
@@ -24,6 +24,7 @@ interface WebSocketStory {
   synopsis?: string;
   art_style?: string;
   character_bible?: string;
+  characters?: Array<{ name: string; description: string }>;
   panels?: Array<{
     index: number;
     caption: string;
@@ -43,6 +44,8 @@ export function StoryContentPage() {
   const [isWaitingForStory, setIsWaitingForStory] = useState(false);
   const [storyGenerated, setStoryGenerated] = useState(false);
 
+  const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
+
   // Sync with wizard state when story is updated
   useEffect(() => {
     if (state.story?.title) {
@@ -51,8 +54,8 @@ export function StoryContentPage() {
     if (state.story?.synopsis) {
       setSynopsis(state.story.synopsis);
     }
-    // Check if panels exist - indicates story generation is complete
-    if (state.story?.panels && state.story.panels.length > 0) {
+    // Character metadata indicates the reference step is ready.
+    if (state.story?.character_bible) {
       setStoryGenerated(true);
     }
   }, [state.story]);
@@ -62,10 +65,9 @@ export function StoryContentPage() {
   }, []);
 
   // Handle story updates from WebSocket
-  const handleStoryUpdate = useCallback((storyUpdate: WebSocketStory | null) => {
-    if (storyUpdate && storyUpdate.panels && storyUpdate.panels.length > 0) {
-      // Convert Panel format and update state
-      const convertedPanels = storyUpdate.panels.map((p) => ({
+  const handleStoryUpdate = useCallback((storyUpdate?: WebSocketStory | null) => {
+    if (storyUpdate && storyUpdate.character_bible) {
+      const convertedPanels = (storyUpdate.panels || []).map((p) => ({
         index: p.index,
         caption: p.caption,
         image_prompt: p.image_prompt,
@@ -80,6 +82,7 @@ export function StoryContentPage() {
           synopsis: storyUpdate.synopsis || '',
           art_style: storyUpdate.art_style || '',
           character_bible: storyUpdate.character_bible || '',
+          characters: storyUpdate.characters || [],
           panels: convertedPanels,
         },
       });
@@ -91,6 +94,11 @@ export function StoryContentPage() {
   useWebSocket({
     jobId: state.jobId || '',
     onStoryUpdate: handleStoryUpdate,
+    onSlugUpdate: useCallback((slug: string) => dispatch({ type: 'SET_SLUG', payload: slug }), [dispatch]),
+    onError: useCallback((msg: string) => {
+      setError(msg);
+      setIsWaitingForStory(false);
+    }, []),
   });
 
   const handleUpdate = async () => {
@@ -109,9 +117,9 @@ export function StoryContentPage() {
     await handleUpdate();
     if (!state.jobId) return;
 
-    // If panels already exist, just navigate
+    // If reference metadata already exists, just navigate.
     if (storyGenerated) {
-      navigate('/styleReference');
+      navigate(projectPath('styleReference'));
       return;
     }
 
@@ -121,22 +129,21 @@ export function StoryContentPage() {
 
     try {
       await proceedToNextStage(state.jobId);
-      // Wait a bit for WebSocket to update the state with panels
-      // The wizard context should update automatically via WebSocket
-      setTimeout(() => {
-        if (state.story?.panels && state.story.panels.length > 0) {
-          navigate('/styleReference');
-        } else {
-          setError('Story generation is taking longer than expected. Please try again.');
-          setIsWaitingForStory(false);
-        }
-      }, 3000);
+      // We don't navigate here anymore. 
+      // The useEffect below will handle navigation when the WebSocket updates the state.
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to proceed';
       setError(errorMessage);
       setIsWaitingForStory(false);
     }
   };
+
+  // Auto-navigate when story is ready and we are waiting
+  useEffect(() => {
+    if (isWaitingForStory && storyGenerated) {
+      navigate(projectPath('styleReference'));
+    }
+  }, [isWaitingForStory, storyGenerated, navigate, state.slug]);
 
   const handleBack = () => {
     navigate('/');
@@ -148,7 +155,7 @@ export function StoryContentPage() {
       <div className="flex justify-center items-center min-h-[400px]">
         <div className="text-center">
           <Spinner className="mx-auto mb-4" />
-          <p className="text-text-dim">Generating story with panels...</p>
+          <p className="text-text-dim">Preparing character reference details...</p>
         </div>
       </div>
     );
@@ -168,7 +175,7 @@ export function StoryContentPage() {
 
   return (
     <div className="flex justify-center">
-      <div className="form-section max-w-8xl mt-10">
+      <div className="form-section w-full max-w-8xl mt-10">
         <div className="text-xs text-text-dim mb-3">Step 2: Story Content</div>
         <h2 className="text-xl text-gold mb-4">📖 Your Story</h2>
 

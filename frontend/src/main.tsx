@@ -10,6 +10,7 @@ import { StyleReferencePage } from './pages/StyleReferencePage';
 import { PanelBreakdownPage } from './pages/PanelBreakdownPage';
 import { PanelImagesPage } from './pages/PanelImagesPage';
 import { ReviewPage } from './pages/ReviewPage';
+import { ProjectLoader } from './pages/ProjectLoader';
 import './index.css';
 
 const router = createBrowserRouter([
@@ -24,6 +25,13 @@ const router = createBrowserRouter([
       { path: 'panelBreakdown', element: <PanelBreakdownPage /> },
       { path: 'panelImages', element: <PanelImagesPage /> },
       { path: 'review', element: <ReviewPage /> },
+      { path: ':slug', element: <ProjectLoader /> },
+      { path: ':slug/comicInfo', element: <ComicInfoPage /> },
+      { path: ':slug/storyContent', element: <StoryContentPage /> },
+      { path: ':slug/styleReference', element: <StyleReferencePage /> },
+      { path: ':slug/panelBreakdown', element: <PanelBreakdownPage /> },
+      { path: ':slug/panelImages', element: <PanelImagesPage /> },
+      { path: ':slug/review', element: <ReviewPage /> },
     ],
   },
 ]);

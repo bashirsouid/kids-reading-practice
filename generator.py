@@ -45,6 +45,7 @@ LIGHTNING_LORA_FILE = "sdxl_lightning_4step_lora.safetensors"
 IP_ADAPTER_REPO = "h94/IP-Adapter"
 IP_ADAPTER_SUBFOLDER = "sdxl_models"
 IP_ADAPTER_WEIGHT = "ip-adapter-plus_sdxl_vit-h.safetensors"
+IP_ADAPTER_IMAGE_ENCODER_FOLDER = "models/image_encoder"
 # Scale 0.0 = ignore reference; 1.0 = strongly bias toward reference.
 # 0.6 leaves enough headroom for the prompt to drive scene composition
 # while keeping characters recognisable across panels.
@@ -170,6 +171,7 @@ class TextGenerator:
             out = self.pipe(
                 messages,
                 max_new_tokens=max_tokens,
+                max_length=max_tokens,
                 do_sample=True,
                 temperature=0.5,
                 return_full_text=False,
@@ -205,6 +207,26 @@ class TextGenerator:
                         f"Failed to generate valid story after {max_retries} attempts: {e}"
                     )
         raise ValueError("Story generation failed")
+
+    def generate_reference_profile(self, synopsis: str, title: str = "Untitled", max_retries: int = 5) -> ComicStory:
+        """Generate style and character metadata for the reference step only."""
+        prompt = _build_reference_profile_prompt(synopsis, title)
+        for attempt in range(max_retries):
+            raw = ""
+            try:
+                raw = self.generate(prompt, max_tokens=900)
+                result = _parse_reference_profile_text(raw, synopsis, title)
+                logger.info(f"Reference profile generation succeeded on attempt {attempt + 1}.")
+                return result
+            except (KeyError, ValueError) as e:
+                raw_short = raw[:800] + "..." if len(raw) > 800 else raw
+                logger.warning(f"Reference profile generation attempt {attempt + 1} failed: {e}")
+                logger.warning(f"Raw output: {raw_short}")
+                if attempt == max_retries - 1:
+                    raise ValueError(
+                        f"Failed to generate valid reference profile after {max_retries} attempts: {e}"
+                    )
+        raise ValueError("Reference profile generation failed")
 
     def generate_random_synopsis(self, theme: Optional[str] = None) -> str:
         """Generate a longer random story synopsis (5-8 sentences).
@@ -252,6 +274,36 @@ class TextGenerator:
             else:
                 return generated.strip()
 
+    def generate_title(self, synopsis: str) -> str:
+        """Generate a catchy title for the story based on the synopsis."""
+        prompt = (
+            f"Generate a catchy, fun title (max 5 words) for a children's comic book based on this synopsis:\n"
+            f"'{synopsis}'\n\n"
+            f"Respond with ONLY the title text, nothing else."
+        )
+        with self._lock:
+            self.load()
+            messages = [
+                {"role": "system", "content": "You are a creative children's book author. Respond with only the title."},
+                {"role": "user", "content": prompt},
+            ]
+            out = self.pipe(
+                messages,
+                max_new_tokens=50,
+                do_sample=True,
+                temperature=0.7,
+                return_full_text=False,
+            )
+            
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+            generated = out[0]["generated_text"]
+            if isinstance(generated, list):
+                return generated[-1]["content"].strip().strip('"').strip("'")
+            else:
+                return generated.strip().strip('"').strip("'")
+
 
 def _build_story_prompt(synopsis: str) -> str:
     """Build the structured plain-text prompt for a comic story.
@@ -287,6 +339,24 @@ CAPTION: ...
 
 Keep the story positive and educational. Output exactly six panels labeled
 PANEL 1 through PANEL 6."""
+
+
+def _build_reference_profile_prompt(synopsis: str, title: str) -> str:
+    """Build metadata only for Step 3 reference generation."""
+    return f"""Create character reference metadata for this children's comic book.
+
+TITLE: {title}
+
+SYNOPSIS: "{synopsis}"
+
+Use EXACTLY the following labeled plain-text format. Do not output JSON.
+Do not output markdown. Do not add panels, scenes, captions, or commentary.
+
+TITLE: <story title on one line>
+
+ART_STYLE: <one short sentence describing the visual style, e.g. "bright colorful children's book illustration, clean lines, friendly characters">
+
+CHARACTER_BIBLE: <one paragraph describing EVERY important character likely to appear in this story. For each character cover: species/type, body shape, dominant colors and markings, distinctive features, clothing/accessories.>"""
 
 
 # Top-level header fields that appear before PANEL 1.
@@ -432,8 +502,19 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
             )
         )
 
-    if len(panels) != 6:
-        raise ValueError(f"Expected 6 panels, got {len(panels)}")
+    # Pad or truncate to exactly 6 panels
+    while len(panels) < 6:
+        panels.append(
+            Panel(
+                index=len(panels),
+                characters=[],
+                image_prompt="[Placeholder scene description]",
+                caption="[Placeholder caption text]",
+                is_placeholder=True,
+            )
+        )
+    panels = panels[:6]
+
 
     panels.sort(key=lambda p: p.index)
 
@@ -447,6 +528,35 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
         art_style=headers.get("ART_STYLE", "children's book illustration"),
         character_bible=character_bible,
         panels=panels,
+        characters=characters,
+    )
+
+
+def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) -> ComicStory:
+    text = raw.strip()
+    if text.startswith("```"):
+        nl = text.find("\n")
+        if nl != -1:
+            text = text[nl + 1:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+
+    headers: dict[str, str] = {}
+    for m in _HEADER_FIELD_RE.finditer(text):
+        headers[m.group(1).upper()] = m.group(2).strip()
+
+    character_bible = headers.get("CHARACTER_BIBLE", "").strip()
+    if not character_bible:
+        raise ValueError("Missing CHARACTER_BIBLE")
+
+    characters = _auto_detect_characters(character_bible)
+
+    return ComicStory(
+        title=headers.get("TITLE", fallback_title).strip() or fallback_title,
+        synopsis=synopsis,
+        art_style=headers.get("ART_STYLE", "children's book illustration"),
+        character_bible=character_bible,
+        panels=[],
         characters=characters,
     )
 
@@ -509,13 +619,20 @@ class ImageGenerator:
             return
 
         from diffusers import StableDiffusionXLPipeline
+        from transformers import CLIPVisionModelWithProjection
 
         logger.info(f"Loading SDXL base: {self.model_id}")
+        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+            IP_ADAPTER_REPO,
+            subfolder=IP_ADAPTER_IMAGE_ENCODER_FOLDER,
+            torch_dtype=DTYPE,
+        )
         self.pipe = StableDiffusionXLPipeline.from_pretrained(
             self.model_id,
             torch_dtype=DTYPE,
             variant="fp16",
             use_safetensors=True,
+            image_encoder=image_encoder,
         ).to(DEVICE)
 
         # SDXL-Lightning LoRA is incompatible with IP-Adapter. The LoRA
@@ -537,10 +654,9 @@ class ImageGenerator:
         self.pipe.vae = _patch_vae_for_cpu_execution(self.pipe.vae)
         logger.info("VAE pinned to CPU/fp32 for gfx1151 stability.")
 
-        try:
-            self.pipe.enable_attention_slicing(1)
-        except Exception as e:
-            logger.warning(f"Attention slicing not available: {e}")
+        # Do not call enable_attention_slicing() after loading IP-Adapter:
+        # it swaps attention processors and can make Diffusers pass tuple
+        # encoder states into attention code that expects tensors.
 
         logger.info("SDXL + IP-Adapter Plus loaded.")
 

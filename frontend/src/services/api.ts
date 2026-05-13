@@ -1,4 +1,5 @@
 // API wrapper functions
+import type { Character, Panel } from '../types/wizard';
 
 const API_BASE = '/api';
 
@@ -25,7 +26,7 @@ export async function checkHealth(): Promise<{ models_loaded: boolean; models_lo
 export async function generateStory(data: {
   mode: string;
   text?: string;
-}): Promise<{ job_id: string }> {
+}): Promise<{ job_id: string; slug?: string }> {
   const response = await fetch(`${API_BASE}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -69,13 +70,13 @@ export async function updateArtStyle(jobId: string, artStyle: string): Promise<v
 }
 
 export async function generateMasterReference(jobId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/proceed/${jobId}`, {
+  const response = await fetch(`${API_BASE}/generate-reference/${jobId}`, {
     method: 'POST',
   });
   return handleResponse(response);
 }
 
-export async function generatePanelBreakdown(jobId: string): Promise<{ breakdown: unknown[] }> {
+export async function generatePanelBreakdown(jobId: string): Promise<{ breakdown?: Panel[]; panels?: number }> {
   const response = await fetch(`${API_BASE}/generate-panel-breakdown/${jobId}`, {
     method: 'POST',
   });
@@ -89,6 +90,25 @@ export async function generatePanels(jobId: string): Promise<void> {
   return handleResponse(response);
 }
 
+export async function getJobStatus(jobId: string): Promise<{
+  status: string;
+  stage: string;
+  progress_current: number;
+  progress_total: number;
+  error?: string | null;
+  story?: {
+    title?: string;
+    synopsis?: string;
+    art_style?: string;
+    character_bible?: string;
+    panels?: Panel[];
+    characters?: Character[];
+  };
+}> {
+  const response = await fetch(`${API_BASE}/status/${jobId}`);
+  return handleResponse(response);
+}
+
 export async function updatePanels(jobId: string, panels: unknown[]): Promise<void> {
   const response = await fetch(`${API_BASE}/update-panels`, {
     method: 'POST',
@@ -98,7 +118,7 @@ export async function updatePanels(jobId: string, panels: unknown[]): Promise<vo
   return handleResponse(response);
 }
 
-export async function getRecentProjects(): Promise<Array<{ slug: string; title: string; created_at: number }>> {
+export async function getRecentProjects(): Promise<Array<{ slug: string; title: string; created_at: number; status?: string; stage?: string }>> {
   const response = await fetch(`${API_BASE}/recent`);
   return handleResponse(response);
 }
@@ -106,14 +126,17 @@ export async function getRecentProjects(): Promise<Array<{ slug: string; title: 
 export async function loadProject(slug: string): Promise<{
   job_id: string;
   has_reference: boolean;
-  story: {
+  story?: {
     title?: string;
     synopsis?: string;
     art_style?: string;
-    panels?: unknown[];
-    characters?: unknown[];
+    character_bible?: string;
+    panels?: Panel[];
+    characters?: Character[];
   };
   stage: string;
+  status?: string;
+  error?: string | null;
 }> {
   const response = await fetch(`${API_BASE}/status/slug/${slug}`);
   return handleResponse(response);
