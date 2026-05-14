@@ -13,6 +13,8 @@ import { useWizard } from '../context/WizardContext';
 import { PanelGrid } from '../components/panel/PanelGrid';
 import { Button } from '../components/ui/Button';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { ImageLightbox } from '../components/ui/ImageLightbox';
+import { getPanelImageUrl } from '../services/api';
 import type { PanelGenerationProgress } from '../components/panel/PanelCard';
 
 export function ReviewPage() {
@@ -22,6 +24,7 @@ export function ReviewPage() {
 
   /** Per-panel generation state for regeneration progress. */
   const [generatingPanels, setGeneratingPanels] = useState<Record<number, PanelGenerationProgress | true>>({});
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'review' });
@@ -77,6 +80,14 @@ export function ReviewPage() {
     }
   };
 
+  const handlePanelClick = (index: number) => {
+    const panels = state.story?.panels || [];
+    const panel = panels[index];
+    if (panel?.has_image && state.jobId) {
+      setLightboxUrl(getPanelImageUrl(state.jobId, index));
+    }
+  };
+
 
 
   const handleBack = () => {
@@ -109,19 +120,18 @@ export function ReviewPage() {
       </div>
 
       <div>
-        <div className="zoom-controls">
-          <Button variant="secondary" size="sm">−</Button>
-          <span className="zoom-display">100%</span>
-          <Button variant="secondary" size="sm">+</Button>
-        </div>
         {state.story?.panels && (
           <PanelGrid
             panels={state.story.panels}
             jobId={state.jobId}
             generatingPanels={generatingPanels}
+            onPanelClick={handlePanelClick}
           />
         )}
       </div>
+      {lightboxUrl && (
+        <ImageLightbox src={lightboxUrl} onClose={() => setLightboxUrl(null)} />
+      )}
     </div>
   );
 }

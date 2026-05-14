@@ -7,7 +7,7 @@ const initialState: WizardState = {
   mode: 'random',
   manualStyle: 'Modern Pixar 3D animation style',
   story: null,
-  zoom: 100,
+
   page: 'home',
   modelStatus: 'loading',
   progress: { type: '', percent: 0, label: '' },
@@ -27,8 +27,7 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, mode: action.payload };
     case 'SET_STORY':
       return { ...state, story: action.payload };
-    case 'SET_ZOOM':
-      return { ...state, zoom: action.payload };
+
     case 'SET_PAGE':
       return { ...state, page: action.payload };
     case 'SET_MODEL_STATUS':

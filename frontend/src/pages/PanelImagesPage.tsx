@@ -13,13 +13,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generatePanels, getJobStatus } from '../services/api';
+import { proceedToNextStage, generatePanels, getJobStatus, getPanelImageUrl } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { Button } from '../components/ui/Button';
 import { ProgressBar } from '../components/ui/ProgressBar';
 import { PanelGrid } from '../components/panel/PanelGrid';
 import { ErrorMessage } from '../components/ui/ErrorMessage';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { ImageLightbox } from '../components/ui/ImageLightbox';
 import type { PanelGenerationProgress } from '../components/panel/PanelCard';
 
 export function PanelImagesPage() {
@@ -28,6 +29,7 @@ export function PanelImagesPage() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 6 });
   const [error, setError] = useState<string | null>(null);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
@@ -280,20 +282,22 @@ export function PanelImagesPage() {
 
       <div>
         {panels.length > 0 && (
-          <>
-            <div className="zoom-controls">
-              <Button variant="secondary" size="sm">−</Button>
-              <span className="zoom-display">100%</span>
-              <Button variant="secondary" size="sm">+</Button>
-            </div>
-            <PanelGrid
-              panels={panels}
-              jobId={state.jobId}
-              generatingPanels={generatingPanels}
-            />
-          </>
+          <PanelGrid
+            panels={panels}
+            jobId={state.jobId}
+            generatingPanels={generatingPanels}
+            onPanelClick={(idx) => {
+              const panel = panels[idx];
+              if (panel?.has_image && state.jobId) {
+                setLightboxUrl(getPanelImageUrl(state.jobId, idx));
+              }
+            }}
+          />
         )}
       </div>
+      {lightboxUrl && (
+        <ImageLightbox src={lightboxUrl} onClose={() => setLightboxUrl(null)} />
+      )}
     </div>
   );
 }

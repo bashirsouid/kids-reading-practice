@@ -776,7 +776,7 @@ def compute_panel_rects():
 
 def render_page(story: ComicStory) -> Image.Image:
     """Render the full comic page as an 8.5×11" PIL Image."""
-    page = Image.new("RGB", (PAGE_W, PAGE_H), (245, 235, 220))
+    page = Image.new("RGB", (PAGE_W, PAGE_H), (255, 255, 255))
     draw = ImageDraw.Draw(page)
 
     # Load fonts
@@ -789,12 +789,11 @@ def render_page(story: ComicStory) -> Image.Image:
         font_caption = font_title
         font_badge = font_title
 
-    # Title banner
-    draw.rectangle([0, 0, PAGE_W, TITLE_H], fill=(20, 20, 60))
+    # Title banner — white background with black text for ink-saving prints
+    draw.rectangle([0, 0, PAGE_W, TITLE_H], fill=(255, 255, 255))
     tx = PAGE_W // 2
     ty = TITLE_H // 2
-    draw.text((tx + 3, ty + 3), story.title, font=font_title, fill=(0, 0, 0), anchor="mm")
-    draw.text((tx, ty), story.title, font=font_title, fill=(255, 220, 50), anchor="mm")
+    draw.text((tx, ty), story.title, font=font_title, fill=(20, 20, 20), anchor="mm")
 
     # Panels
     rects = compute_panel_rects()
@@ -820,8 +819,8 @@ def render_page(story: ComicStory) -> Image.Image:
                 anchor="mm",
             )
 
-        # Caption strip
-        draw.rectangle([x, y + img_h, x + pw, y + ph], fill=(240, 230, 200))
+        # Caption strip — white background for ink-saving
+        draw.rectangle([x, y + img_h, x + pw, y + ph], fill=(255, 255, 255))
         if panel:
             _draw_wrapped_text(
                 draw, panel.caption, font_caption,

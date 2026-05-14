@@ -40,7 +40,7 @@ export interface WizardState {
   mode: StoryMode;
   manualStyle: string;
   story: Story | null;
-  zoom: number;
+
   page: string;
   modelStatus: 'loading' | 'ready' | 'error';
   progress: Progress;
@@ -52,7 +52,7 @@ export type WizardAction =
   | { type: 'SET_JOB_ID'; payload: string }
   | { type: 'SET_SLUG'; payload: string }
   | { type: 'SET_STORY'; payload: Story }
-  | { type: 'SET_ZOOM'; payload: number }
+
   | { type: 'SET_PAGE'; payload: string }
   | { type: 'SET_MODEL_STATUS'; payload: 'loading' | 'ready' | 'error' }
   | { type: 'SET_PROGRESS'; payload: Progress }
