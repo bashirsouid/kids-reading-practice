@@ -244,6 +244,35 @@ For deeper issues, consult the agent’s `--help` output or inspect the script�
 
 ---
 
+## Backend Structure
+
+The backend is organized as a modular Python package:
+
+```
+backend/
+├── __init__.py       # Package exports (models, state, config)
+├── main.py           # FastAPI application entry point
+├── config.py         # Configuration constants and paths (LOG_DIR, STATIC_DIR, etc.)
+├── models.py         # Pydantic models (JobStatus, ComicJob, request DTOs)
+├── state.py          # Global state (jobs, job_queue, active_websockets, models)
+├── persistence.py    # Job save/load and image persistence (save_jobs, load_jobs)
+├── broadcasting.py   # WebSocket and progress broadcasting functions
+├── jobs.py           # Job processing worker (job_worker, process_job)
+├── utils.py          # Helper utilities (log_system_resources, _image_to_base64, slug generation)
+└── api/
+    ├── __init__.py
+    └── routes.py     # All API route handlers
+```
+
+**Entry Point:**
+```bash
+python -m backend.main
+# or
+uvicorn backend.main:app --host 0.0.0.0 --port 7860
+```
+
+---
+
 ## License
 
 All agents are released under the same license as the main project (see `LICENSE` file). Modifications must retain the original copyright notices.

@@ -17,11 +17,34 @@ An AI-powered comic book generator specifically designed to create engaging read
 
 ## 🛠️ Technology Stack
 
-- **Backend**: FastAPI (Python 3.10)
+- **Backend**: FastAPI (Python 3.10) - See [`backend/`](backend/) for the modular structure
 - **Image Model**: SDXL-Lightning (ByteDance) + TinyVAE
 - **Text Model**: Qwen2.5-7B-Instruct (via Transformers)
 - **Compute Backend**: AMD ROCm (PyTorch)
 - **Infrastructure**: Docker Compose
+
+## 📁 Project Structure
+
+```
+.
+├── backend/               # Backend FastAPI application
+│   ├── __init__.py       # Package exports (models, state, config)
+│   ├── main.py           # Application entry point
+│   ├── config.py         # Configuration constants and paths
+│   ├── models.py         # Pydantic models and dataclasses
+│   ├── state.py          # Global state (jobs, queues, websockets)
+│   ├── persistence.py    # Job save/load and image persistence
+│   ├── broadcasting.py   # WebSocket and progress broadcasting
+│   ├── jobs.py           # Job processing worker
+│   ├── utils.py          # Helper utilities
+│   └── api/
+│       ├── __init__.py
+│       └── routes.py     # All API route handlers
+├── frontend/             # React/Vite frontend application
+├── generator.py          # AI generation logic (ComicStory, Panel, etc.)
+├── gpu_utils.py          # GPU resource limiting utilities
+└── requirements.txt      # Python dependencies
+```
 
 ## 📦 Getting Started
 
@@ -45,6 +68,17 @@ An AI-powered comic book generator specifically designed to create engaging read
 
 3. **Access the App**:
    Open your browser and navigate to `http://localhost:7860`.
+
+### Running Locally (without Docker)
+
+```bash
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Run the server
+python -m backend.main
+# or: uvicorn backend.main:app --host 0.0.0.0 --port 7860
+```
 
 ## ⚙️ Configuration
 

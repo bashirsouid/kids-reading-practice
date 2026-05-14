@@ -53,9 +53,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY *.py ./
+COPY backend/ ./backend/
 COPY static/ ./static/
 
 EXPOSE 7860
 
 # Self-healing startup: remove any corrupted directories and then start the server.
-CMD ["bash", "-c", "rm -rf /root/.cache/miopen/* && python -u server.py"]
+CMD ["bash", "-c", "rm -rf /root/.cache/miopen/* && python -u -m backend.main"]
