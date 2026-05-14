@@ -161,95 +161,6 @@ export function StyleReferencePage() {
           />
         </div>
 
-        <div className="mb-4">
-          <div className="bg-bg p-4 rounded-lg text-center mb-4">
-            {error && (
-              <div className="bg-red-900/50 border border-red-500 text-red-200 p-3 rounded-md mb-3 text-sm">
-                <strong>Error:</strong> {error}
-                <button 
-                  onClick={() => setError(null)}
-                  className="ml-2 text-red-400 hover:text-red-200"
-                >
-                  ×
-                </button>
-              </div>
-            )}
-            {hasReference ? (
-              <div className="flex flex-col items-center">
-                <img
-                  src={`/api/master-reference/${state.slug}?t=${Date.now()}`}
-                  alt="Reference"
-                  className="max-w-full rounded-lg cursor-pointer mx-auto mb-3"
-                  onError={(e) => {
-                    // If image fails to load, indicate that
-                    setHasReference(false);
-                    setError('Reference image failed to load. Please regenerate.');
-                  }}
-                />
-                <Button 
-                  variant="secondary" 
-                  size="sm" 
-                  onClick={handleGenerateReference} 
-                  disabled={isGeneratingRef}
-                >
-                  {isGeneratingRef ? 'Regenerating...' : '🔄 Regenerate Reference'}
-                </Button>
-              </div>
-            ) : (
-              <div>
-                {isGeneratingRef ? (
-                  <div className="flex flex-col items-center py-8">
-                    <div className="gen-overlay-inline">
-                      <div className="gen-progress-ring-container gen-progress-ring-lg">
-                        <svg className="gen-progress-ring" viewBox="0 0 80 80">
-                          <circle
-                            className="gen-progress-ring-track"
-                            cx="40" cy="40" r="34"
-                            fill="none"
-                            strokeWidth="5"
-                          />
-                          <circle
-                            className="gen-progress-ring-fill"
-                            cx="40" cy="40" r="34"
-                            fill="none"
-                            strokeWidth="5"
-                            strokeDasharray={`${2 * Math.PI * 34}`}
-                            strokeDashoffset={`${2 * Math.PI * 34 * (1 - progressPercent / 100)}`}
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                        <div className="gen-progress-text gen-progress-text-lg">
-                          {refProgress
-                            ? `${refProgress.step}/${refProgress.totalSteps}`
-                            : '...'}
-                        </div>
-                      </div>
-                    </div>
-                    <p className="text-text-dim text-sm mt-4">
-                      Generating reference image...
-                      {refProgress && (
-                        <span className="text-accent ml-1">
-                          Step {refProgress.step} of {refProgress.totalSteps}
-                        </span>
-                      )}
-                    </p>
-                  </div>
-                ) : (
-                  <>
-                    <p className="text-text-dim text-sm mb-3">
-                      Click to generate the master reference image
-                    </p>
-                    <Button variant="primary" onClick={handleGenerateReference}>🖼️ Generate Reference Image</Button>
-                    <p className="text-text-dim text-xs mt-3">
-                      The reference image ensures character consistency across all panels
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
         <WizardNav
           onBack={handleBack}
           onNext={handleNext}
@@ -258,7 +169,97 @@ export function StyleReferencePage() {
         />
       </div>
 
-      <div />
+      <div className="form-section">
+        <div className="text-sm font-semibold text-text-dim mb-4">Master Reference Image</div>
+        <div className="bg-bg p-4 rounded-lg text-center min-h-[300px] flex flex-col justify-center">
+          {error && (
+            <div className="bg-red-900/50 border border-red-500 text-red-200 p-3 rounded-md mb-3 text-sm">
+              <strong>Error:</strong> {error}
+              <button 
+                onClick={() => setError(null)}
+                className="ml-2 text-red-400 hover:text-red-200"
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {hasReference ? (
+            <div className="flex flex-col items-center">
+              <img
+                src={`/api/master-reference/${state.slug}?t=${Date.now()}`}
+                alt="Reference"
+                className="max-w-full rounded-lg cursor-pointer mx-auto mb-3"
+                onError={(e) => {
+                  // If image fails to load, indicate that
+                  setHasReference(false);
+                  setError('Reference image failed to load. Please regenerate.');
+                }}
+              />
+              <Button 
+                variant="secondary" 
+                size="sm" 
+                onClick={handleGenerateReference} 
+                disabled={isGeneratingRef}
+              >
+                {isGeneratingRef ? 'Regenerating...' : '🔄 Regenerate Reference'}
+              </Button>
+            </div>
+          ) : (
+            <div>
+              {isGeneratingRef ? (
+                <div className="flex flex-col items-center py-8">
+                  <div className="gen-overlay-inline">
+                    <div className="gen-progress-ring-container gen-progress-ring-lg">
+                      <svg className="gen-progress-ring" viewBox="0 0 80 80">
+                        <circle
+                          className="gen-progress-ring-track"
+                          cx="40" cy="40" r="34"
+                          fill="none"
+                          strokeWidth="5"
+                        />
+                        <circle
+                          className="gen-progress-ring-fill"
+                          cx="40" cy="40" r="34"
+                          fill="none"
+                          strokeWidth="5"
+                          strokeDasharray={`${2 * Math.PI * 34}`}
+                          strokeDashoffset={`${2 * Math.PI * 34 * (1 - progressPercent / 100)}`}
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                      <div className="gen-progress-text gen-progress-text-lg">
+                        {refProgress
+                          ? `${refProgress.step}/${refProgress.totalSteps}`
+                          : '...'}
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-text-dim text-sm mt-4">
+                    Generating reference image...
+                    {refProgress && (
+                      <span className="text-accent ml-1">
+                        Step {refProgress.step} of {refProgress.totalSteps}
+                      </span>
+                    )}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="py-12 border-2 border-dashed border-white/5 rounded-xl mb-4">
+                    <p className="text-text-dim text-sm mb-4">
+                      No master reference generated yet.
+                    </p>
+                    <Button variant="primary" onClick={handleGenerateReference}>🖼️ Generate Reference Image</Button>
+                  </div>
+                  <p className="text-text-dim text-xs">
+                    The reference image ensures character consistency across all panels
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
