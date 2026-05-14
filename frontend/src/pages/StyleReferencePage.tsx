@@ -12,7 +12,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generateMasterReference, updateArtStyle } from '../services/api';
+import { proceedToNextStage, generateMasterReference, updateArtStyle, updateCharacters } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
 import { CharacterList } from '../components/character/CharacterList';
@@ -117,18 +117,41 @@ export function StyleReferencePage() {
     }
   };
 
-  const handleCharacterUpdate = (idx: number, field: 'name' | 'description', value: string) => {
+  const handleCharacterUpdate = async (idx: number, field: 'name' | 'description', value: string) => {
     const newChars = [...characters];
     newChars[idx] = { ...newChars[idx], [field]: value };
     setCharacters(newChars);
+    if (state.jobId) {
+      try {
+        await updateCharacters(state.jobId, newChars);
+      } catch (err) {
+        console.error('Failed to sync character update', err);
+      }
+    }
   };
 
-  const handleAddCharacter = () => {
-    setCharacters([...characters, { name: `Character ${characters.length + 1}`, description: '' }]);
+  const handleAddCharacter = async () => {
+    const newChars = [...characters, { name: `Character ${characters.length + 1}`, description: '' }];
+    setCharacters(newChars);
+    if (state.jobId) {
+      try {
+        await updateCharacters(state.jobId, newChars);
+      } catch (err) {
+        console.error('Failed to sync character add', err);
+      }
+    }
   };
 
-  const handleRemoveCharacter = (idx: number) => {
-    setCharacters(characters.filter((_, i) => i !== idx));
+  const handleRemoveCharacter = async (idx: number) => {
+    const newChars = characters.filter((_, i) => i !== idx);
+    setCharacters(newChars);
+    if (state.jobId) {
+      try {
+        await updateCharacters(state.jobId, newChars);
+      } catch (err) {
+        console.error('Failed to sync character remove', err);
+      }
+    }
   };
 
   const handleBack = () => {

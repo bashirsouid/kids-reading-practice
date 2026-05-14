@@ -69,6 +69,15 @@ export async function updateArtStyle(jobId: string, artStyle: string): Promise<v
   return handleResponse(response);
 }
 
+export async function updateCharacters(jobId: string, characters: Character[]): Promise<void> {
+  const response = await fetch(`${API_BASE}/update-characters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_id: jobId, characters }),
+  });
+  return handleResponse(response);
+}
+
 export async function generateMasterReference(jobId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/generate-reference/${jobId}`, {
     method: 'POST',

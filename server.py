@@ -300,6 +300,11 @@ class RegeneratePanelRequest(BaseModel):
     modification: str = ""  # optional edit text
 
 
+class UpdateCharactersRequest(BaseModel):
+    job_id: str
+    characters: list[dict]
+
+
 class UpdateCaptionRequest(BaseModel):
     job_id: str
     panel_index: int
@@ -1129,6 +1134,24 @@ async def api_update_art_style(req: UpdateArtStyleRequest):
 
     logger.info(f"Updating art style for job {req.job_id} to: {req.art_style}")
     job.story.art_style = req.art_style
+    save_jobs()
+    return {"status": "ok"}
+
+
+@app.post("/api/update-characters")
+async def api_update_characters(req: UpdateCharactersRequest):
+    """Update the character list for a job."""
+    job = jobs.get(req.job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    logger.info(f"Updating characters for job {req.job_id}")
+    from generator import Character
+    new_chars = []
+    for cdict in req.characters:
+        new_chars.append(Character(name=cdict.get("name", ""), description=cdict.get("description", "")))
+    
+    job.story.characters = new_chars
     save_jobs()
     return {"status": "ok"}
 

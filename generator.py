@@ -381,74 +381,77 @@ _HEADER_FIELD_RE = re.compile(
 )
 
 
-def _auto_detect_characters(character_bible: str) -> list:
-    """Extract character names and descriptions from character bible text.
+def _auto_detect_characters(character_bible: str) -> list[Character]:
+    """Parse a list of characters from the LLM-generated character bible.
     
-    Parses the character bible and returns a list of Character objects.
-    Uses simple heuristics to find character name + description pairs.
-    Filters out pronouns and non-name words.
+    Tries to be robust against various formats (bulleted lists, colons, bolding).
+    Returns a list of Character objects with names and descriptions.
     """
     if not character_bible:
         return []
-    
+        
     characters = []
     
-    # Common English pronouns and non-name words to exclude
+    # Split by lines first to handle list formats
+    lines = [line.strip() for line in character_bible.split('\n') if line.strip()]
+    
     EXCLUDED_WORDS = {
-        'he', 'she', 'it', 'they', 'them', 'him', 'her', 'his', 'hers',
-        'its', 'their', 'theirs', 'this', 'that', 'these', 'those',
-        'what', 'which', 'who', 'whom', 'whose',
+        'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
+        'where', 'how', 'why', 'what', 'which', 'who', 'whom', 'whose',
+        'there', 'this', 'that', 'these', 'those', 'it', 'its', 'he', 'his',
+        'him', 'she', 'her', 'hers', 'they', 'them', 'their', 'theirs',
+        'we', 'us', 'our', 'ours', 'you', 'your', 'yours', 'i', 'me', 'my', 'mine',
+        'mountain', 'forest', 'setting', 'background', 'scene', 'landscape'
     }
-    
-    # Try to split by common sentence patterns
-    # Pattern 1: "Name is a description" or "Name is an description"
-    # Pattern 2: "Name, description"
-    import re
-    
-    # Split into segments - look for patterns like "Name is..." or "Name, ..."
-    segments = re.split(r'(?<=[.!?])\s+(?=[A-Z])', character_bible)
-    
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
+
+    for line in lines:
+        # 1. Try to match list patterns: "- Name: Description" or "* Name: Description" or "1. Name: Description"
+        # Also handles bolding like "- **Name**: Description"
+        list_match = re.match(r'^[\-\*\d\.]*\s*(?:\*\*)?([A-Z][^:]+?)(?:\*\*)?\s*[:\-]\s*(.+)$', line)
+        if list_match:
+            name = list_match.group(1).strip()
+            desc = list_match.group(2).strip()
             
-        # Look for "Name is a/an/the..." pattern
-        m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|was)\s+(?:a|an|the)?\s*(.+)$', segment, re.IGNORECASE)
-        if m:
-            name = m.group(1).strip()
-            desc = m.group(2).strip()
+            # Clean up name (remove extra bolding or trailing punctuation)
+            name = re.sub(r'[\*\:]', '', name).strip()
             
-            # Validate the name - must not be a pronoun or too short
-            name_lower = name.lower()
-            if name_lower in EXCLUDED_WORDS:
-                continue
-            if len(name) < 2:  # Minimum 2 characters
-                continue
-            # Single word names should be at least 3 chars and look like proper names
-            if ' ' not in name and len(name) < 3:
-                continue
-                
-            characters.append(Character(name=name, description=desc))
-        else:
-            # Fallback: first capitalized word as name, rest as description
-            words = segment.split()
-            if words and words[0][0].isupper() and len(words) > 1:
-                name = words[0]
-                name_lower = name.lower()
-                
-                # Skip pronouns and short non-names
-                if name_lower in EXCLUDED_WORDS:
-                    continue
-                if len(name) < 2:
-                    continue
-                if ' ' not in name and len(name) < 3:
-                    continue
-                    
-                desc = ' '.join(words[1:])[:100]  # Limit description length
+            if name.lower() not in EXCLUDED_WORDS and len(name) >= 2:
                 characters.append(Character(name=name, description=desc))
+                continue
+
+        # 2. If not a list item, try sentence-based approach for this line
+        segments = re.split(r'(?<=[.!?])\s+(?=[A-Z])', line)
+        for segment in segments:
+            segment = segment.strip()
+            if not segment: continue
+            
+            # Pattern: "Name is/was a..."
+            m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|was)\s+(?:a|an|the)?\s*(.+)$', segment, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+                desc = m.group(2).strip()
+                if name.lower() not in EXCLUDED_WORDS and len(name) >= 2:
+                    characters.append(Character(name=name, description=desc))
+            else:
+                # Fallback: first capitalized word as name, rest as description
+                words = segment.split()
+                if words and words[0][0].isupper() and len(words) > 1:
+                    name = words[0].strip('.,:;()')
+                    name_lower = name.lower()
+                    
+                    if name_lower not in EXCLUDED_WORDS and len(name) >= 3:
+                        desc = ' '.join(words[1:])[:150]
+                        characters.append(Character(name=name, description=desc))
     
-    return characters
+    # Deduplicate by name
+    seen = set()
+    unique_chars = []
+    for c in characters:
+        if c.name.lower() not in seen:
+            seen.add(c.name.lower())
+            unique_chars.append(c)
+            
+    return unique_chars
 
 
 def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
@@ -890,15 +893,15 @@ def _panel_prompt(story: ComicStory, panel: Panel) -> str:
     """Build the image prompt for a single panel.
 
     The IP-Adapter handles character identity from the master reference,
-    so the prompt focuses on style and scene. We keep the prompt short
-    and front-load the most important content because SDXL's text
-    encoders truncate at 77 tokens each.
+    so the prompt focuses on style and scene. We front-load the style
+    and character focus for maximum impact.
     """
     chars_focus = ""
     if panel.characters:
         chars_focus = f" Featuring {', '.join(panel.characters)}."
+    
     return (
-        f"{story.art_style}. Scene: {panel.image_prompt}.{chars_focus}"
+        f"{story.art_style}, {panel.image_prompt}{chars_focus}"
     )
 
 
@@ -909,22 +912,24 @@ def generate_master_reference(
 ) -> Image.Image:
     """Generate the hidden master character reference image.
 
-    The reference is text2img only (IP-Adapter scale = 0 inside generate
-    when reference_image is None) and shows every character described in
-    the character_bible standing together in a neutral scene. It is then
-    used as the IP-Adapter conditioning image for every panel, which is
-    what gives us cross-panel character consistency.
-
-    The reference is not added to the rendered comic page.
+    The reference is text2img only and shows every character standing together.
+    It is used as the IP-Adapter conditioning image for every panel.
     """
     gen_w, gen_h = _panel_gen_dims(0)
 
+    # Build a character description block from structured characters if available
+    if story.characters:
+        char_list_str = ". ".join([f"{c.name}: {c.description}" for c in story.characters])
+        char_names = ", ".join([c.name for c in story.characters])
+        char_desc = f"Characters: {char_list_str}. All of them ({char_names}) are in the frame."
+    else:
+        char_desc = f"Characters: {story.character_bible}"
+
     prompt = (
-        f"{story.art_style}. "
-        f"Single group illustration showing all the main characters of this "
-        f"story together in one frame, full body view, friendly poses, plain "
-        f"neutral background, soft daylight, clear faces, no text and no "
-        f"labels. Characters: {story.character_bible}"
+        f"{story.art_style}, a single group illustration showing all the characters "
+        f"together in one frame, full body view, standing side-by-side, friendly poses, "
+        f"plain neutral background, soft daylight, clear faces, high quality, "
+        f"no text, no labels. {char_desc}"
     )
 
     logger.info("Generating master character reference image...")
