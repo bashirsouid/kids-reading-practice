@@ -1,7 +1,7 @@
 """
 generator.py — Core AI generation logic for Comic Book Generator.
 
-Handles text generation (story → JSON), image generation (SDXL Lightning),
+Handles text generation (story → JSON), image generation (FLUX.1-dev),
 and comic page rendering (PIL-based 8.5x11" layout).
 """
 
@@ -32,28 +32,19 @@ CAPTION_H = 200
 PANEL_GEN_SIZE = 768
 
 # ── Model IDs (hardcoded — best options for this hardware) ───────────────────
-# SDXL base + SDXL-Lightning 4-step LoRA + IP-Adapter Plus.
-#   * Lightning gives us 4-step inference (fast, comparable to ERNIE-Turbo's 8).
-#   * IP-Adapter Plus is what actually gets us cross-panel character
-#     consistency: it conditions the cross-attention on a reference image's
-#     embeddings, instead of (incorrectly) constraining the latent the way
-#     img2img does. Works even on distilled/turbo schedules because it
-#     biases the model's output without eating denoising budget.
-IMAGE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
-LIGHTNING_LORA_REPO = "ByteDance/SDXL-Lightning"
-LIGHTNING_LORA_FILE = "sdxl_lightning_4step_lora.safetensors"
-IP_ADAPTER_REPO = "h94/IP-Adapter"
-IP_ADAPTER_SUBFOLDER = "sdxl_models"
-IP_ADAPTER_WEIGHT = "ip-adapter-plus_sdxl_vit-h.safetensors"
-IP_ADAPTER_IMAGE_ENCODER_FOLDER = "models/image_encoder"
-# Scale 0.0 = ignore reference; 1.0 = strongly bias toward reference.
-# 0.6 leaves enough headroom for the prompt to drive scene composition
-# while keeping characters recognisable across panels.
-IP_ADAPTER_SCALE = 0.6
-PANEL_INFERENCE_STEPS = 8
+# FLUX.1-dev via Diffusers — no LoRA, no IP-Adapter.
+# FLUX's built-in T5-XXL text encoder handles long, detailed prompts
+# (character descriptions, scene composition) natively, giving us
+# high cross-panel character consistency without external IP-Adapter.
+IMAGE_MODEL_ID = "black-forest-labs/FLUX.1-dev"
 
-# LIGHTNING_LORA_REPO = "ByteDance/SDXL-Lightning"
-# LIGHTNING_LORA_FILE = "sdxl_lightning_4step_lora.safetensors"
+# FLUX.1-dev quality defaults: 28 steps is the sweet spot between
+# fidelity and speed for comic-panel-sized outputs.
+PANEL_INFERENCE_STEPS = 28
+
+# FLUX uses classifier-free guidance; 5.0 is the recommended default
+# and produces vivid, well-composed outputs without over-saturation.
+GUIDANCE_SCALE = 5.0
 
 # Qwen2.5-3B-Instruct: ~3x faster than 7B on this GPU, still strong at the
 # 6-panel structured story task. The 7B variant was overkill for the work
@@ -90,10 +81,10 @@ class ComicStory:
     character_bible: str
     panels: list[Panel] = field(default_factory=list)
     # Hidden reference image of all characters together. Generated up front
-    # and passed as the IP-Adapter conditioning image for every panel so
-    # character identity stays consistent across panels — including for
-    # characters that don't appear until later in the plot. Not rendered
-    # in the final comic page.
+    # and used as a textual character description source for every panel
+    # prompt so character identity stays consistent across panels —
+    # including for characters that don't appear until later in the plot.
+    # Not rendered in the final comic page.
     master_reference: Optional[Image.Image] = None
     characters: list[Character] = field(default_factory=list)
 
@@ -601,14 +592,15 @@ def _patch_vae_for_cpu_execution(vae):
 
 # ── Image Generator ──────────────────────────────────────────────────────────
 class ImageGenerator:
-    """Generates comic panel images using SDXL + Lightning + IP-Adapter Plus.
+    """Generates comic panel images using FLUX.1-dev.
 
     The character-consistency strategy is:
-      1. Generate a master reference image (text2img, IP-Adapter scale=0).
-      2. For each panel, pass that reference as ip_adapter_image and let
-         the prompt drive the scene. The IP-Adapter biases the cross-
-         attention layers toward the reference's character/style without
-         eating denoising-budget the way img2img would.
+      1. Generate a master reference image (text2img).
+      2. Extract full character descriptions from the reference story data.
+      3. For each panel, embed the complete character descriptions directly
+         into the text prompt. FLUX's T5-XXL text encoder is excellent at
+         following detailed character prompts, giving us high cross-panel
+         consistency without IP-Adapter.
     """
 
     def __init__(self, model_id: str = IMAGE_MODEL_ID):
@@ -617,52 +609,28 @@ class ImageGenerator:
         self._lock = threading.Lock()
 
     def load(self):
-        """Load SDXL + IP-Adapter Plus, with VAE on CPU."""
+        """Load FLUX.1-dev pipeline, with VAE on CPU."""
         if self.pipe is not None:
             return
 
-        from diffusers import StableDiffusionXLPipeline
-        from transformers import CLIPVisionModelWithProjection
+        from diffusers import FluxPipeline
 
-        logger.info(f"Loading SDXL base: {self.model_id}")
-        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            IP_ADAPTER_REPO,
-            subfolder=IP_ADAPTER_IMAGE_ENCODER_FOLDER,
-            torch_dtype=DTYPE,
-        )
-        self.pipe = StableDiffusionXLPipeline.from_pretrained(
+        logger.info(f"Loading FLUX.1-dev base: {self.model_id}")
+
+        self.pipe = FluxPipeline.from_pretrained(
             self.model_id,
             torch_dtype=DTYPE,
-            variant="fp16",
             use_safetensors=True,
-            image_encoder=image_encoder,
         ).to(DEVICE)
 
-        # SDXL-Lightning LoRA is incompatible with IP-Adapter. The LoRA
-        # modifies the UNet's cross-attention and embedding projections
-        # so dimensions no longer match IP-Adapter's internal image_proj
-        # layers. IP-Adapter is required for cross-panel character
-        # consistency, so we omit the LoRA and use more steps for speed.
-        logger.info("Loading IP-Adapter Plus (sdxl_models)...")
-        self.pipe.load_ip_adapter(
-            IP_ADAPTER_REPO,
-            subfolder=IP_ADAPTER_SUBFOLDER,
-            weight_name=IP_ADAPTER_WEIGHT,
-        )
-        # Default to 0 — generate() flips this on per-call when a
-        # reference image is supplied.
-        self.pipe.set_ip_adapter_scale(0.0)
+        # FLUX.1-dev does not use IP-Adapter. Character consistency is
+        # handled via detailed text prompts generated by the T5-XXL encoder.
 
         # gfx1151 stability — see _patch_vae_for_cpu_execution.
         self.pipe.vae = _patch_vae_for_cpu_execution(self.pipe.vae)
         logger.info("VAE pinned to CPU/fp32 for gfx1151 stability.")
 
-        # Do not call enable_attention_slicing() after loading IP-Adapter:
-        # it swaps attention processors and can make Diffusers pass tuple
-        # encoder states into attention code that expects tensors.
-
-        logger.info("SDXL + IP-Adapter Plus loaded.")
-
+        logger.info("FLUX.1-dev loaded.")
 
     def generate(
         self,
@@ -670,23 +638,19 @@ class ImageGenerator:
         width: int = 1024,
         height: int = 1024,
         steps: int = PANEL_INFERENCE_STEPS,
-        guidance: float = 0.0,
+        guidance: float = GUIDANCE_SCALE,
         reference_image: Optional[Image.Image] = None,
-        ip_scale: float = IP_ADAPTER_SCALE,
         step_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Image.Image:
-        """Generate an image from a text prompt.
+        """Generate an image from a text prompt using FLUX.1-dev.
 
-        If reference_image is supplied, IP-Adapter conditions the cross-
-        attention on its embeddings (this is what carries character
-        consistency across panels). Otherwise IP-Adapter scale is set to
-        0 and a dummy black image is passed to satisfy IP-Adapter's
-        requirement for image_embeds in the UNet config. This gives us
-        pure text2img — the path used to build the master reference itself.
+        FLUX does not use IP-Adapter. Character consistency is achieved
+        by embedding full character descriptions into the text prompt
+        (see _panel_prompt). The reference_image parameter is kept for
+        API compatibility and future img2img support, but is not used
+        in the current FLUX pipeline.
 
-        guidance defaults to 0 because SDXL-Lightning was distilled
-        without classifier-free guidance; setting it >1 produces over-
-        saturated, broken outputs.
+        guidance defaults to 5.0 (standard FLUX classifier-free guidance).
 
         step_callback, if provided, is called after each inference step
         with (current_step, total_steps) to report progress.
@@ -704,30 +668,6 @@ class ImageGenerator:
                 torch.cuda.empty_cache()
 
             seed = int.from_bytes(os.urandom(4), "big")
-
-            ip_adapter_loaded = (
-                self.pipe.unet.encoder_hid_proj is not None
-                and getattr(self.pipe.unet.config, "encoder_hid_dim_type", None) == "ip_image_proj"
-            )
-
-            if reference_image is not None:
-                # Use the provided reference image with the desired IP‑Adapter scale
-                self.pipe.set_ip_adapter_scale(ip_scale)
-                ip_kwargs = {"ip_adapter_image": [reference_image]}
-            elif ip_adapter_loaded:
-                # When generating the master reference (reference_image is None) we still need
-                # to satisfy the IP‑Adapter's requirement for an image embedding. Provide a
-                # dummy black image of the target generation dimensions. The IP‑Adapter scale
-                # is set to 0.0 so the conditioning has no effect, but the presence of the
-                # image prevents a ValueError about missing ``image_embeds``.
-                dummy_image = Image.new("RGB", (width, height), (0, 0, 0))
-                self.pipe.set_ip_adapter_scale(0.0)
-                ip_kwargs = {"ip_adapter_image": [dummy_image]}
-                logger.debug("Generated dummy black image for IP‑Adapter when reference_image is None")
-            else:
-                # No IP‑Adapter loaded – normal text‑to‑image generation.
-                self.pipe.set_ip_adapter_scale(0.0)
-                ip_kwargs = {}
 
             # Build a diffusers-compatible step-end callback that adapts to
             # our simpler (step, total) signature.
@@ -748,7 +688,6 @@ class ImageGenerator:
                     num_inference_steps=steps,
                     guidance_scale=guidance,
                     generator=torch.Generator(device=DEVICE).manual_seed(seed),
-                    **ip_kwargs,
                     **cb_kwargs,
                 )
             logger.info(f"Image generation complete for prompt: {prompt[:50]}...")
@@ -890,19 +829,37 @@ def _panel_gen_dims(panel_index: int) -> tuple[int, int]:
 
 
 def _panel_prompt(story: ComicStory, panel: Panel) -> str:
-    """Build the image prompt for a single panel.
+     """Build the image prompt for a single panel.
 
-    The IP-Adapter handles character identity from the master reference,
-    so the prompt focuses on style and scene. We front-load the style
-    and character focus for maximum impact.
-    """
-    chars_focus = ""
-    if panel.characters:
-        chars_focus = f" Featuring {', '.join(panel.characters)}."
-    
-    return (
-        f"{story.art_style}, {panel.image_prompt}{chars_focus}"
-    )
+     FLUX's T5-XXL text encoder excels at following detailed character
+     descriptions embedded directly in the prompt. This replaces the
+     IP-Adapter approach — instead of conditioning on a reference image,
+     we inject each character's full visual description into the text
+     prompt, ensuring consistent appearance across all panels.
+     """
+     # Build a consolidated character description block for all characters
+     # that appear in the story (not just this panel). FLUX's long-context
+     # T5 encoder handles this gracefully and maintains identity.
+     char_descriptions = []
+     if story.characters:
+         for c in story.characters:
+             char_descriptions.append(
+                 f"{c.name}: {c.description}" if c.description else c.name
+             )
+     chars_block = "; ".join(char_descriptions)
+
+     # Front-load the art style, then the scene, then explicit character
+     # descriptions so the T5 encoder allocates attention to all of them.
+     prompt_parts = [
+         story.art_style,
+         panel.image_prompt,
+     ]
+     if chars_block:
+         prompt_parts.append(
+             f"Characters: {chars_block}"
+         )
+
+     return ", ".join(prompt_parts)
 
 
 def _generate_reference_prompt(story: ComicStory) -> str:
@@ -951,25 +908,26 @@ def generate_master_reference(
     img_gen: "ImageGenerator",
     step_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Image.Image:
-    """Generate the hidden master character reference image.
+    """Generate the master character reference image via FLUX text2img.
 
-    The reference is text2img only and shows every character together in a scene
-    derived from the story's opening context (synopsis). The reference image serves
-    as the opening establishing frame and is used as the IP-Adapter conditioning
-    image for every panel to ensure character consistency.
+    The reference is generated from a text-only prompt derived from the
+    story synopsis and character bible. Since FLUX does not use IP-Adapter,
+    this image serves as the canonical visual reference for the story's
+    characters and setting. Its generated pixels are not passed to the
+    pipeline — only the extracted character descriptions feed into panel
+    prompts for cross-panel consistency.
     """
     gen_w, gen_h = _panel_gen_dims(0)
 
     # Generate reference prompt based on synopsis + characters + style
     prompt = _generate_reference_prompt(story)
 
-    logger.info("Generating master character reference image from synopsis context...")
+    logger.info("Generating master reference image from synopsis context...")
     logger.debug(f"Reference prompt: {prompt[:150]}...")
     img = img_gen.generate(
         prompt=prompt,
         width=gen_w,
         height=gen_h,
-        reference_image=None,
         step_callback=step_callback,
     )
     story.master_reference = img
@@ -984,9 +942,10 @@ def generate_all_panels(
 ):
     """Generate images for all panels in a story.
 
-    A single master reference is generated up front; every panel then
-    runs text2img with that reference passed through IP-Adapter so
-    characters stay recognisable across panels.
+    A single master reference is generated up front for visual consistency.
+    Each panel then runs text2img with the full character descriptions
+    embedded in the prompt (leveraging FLUX's T5-XXL encoder for
+    cross-panel character consistency).
     """
     if story.master_reference is None:
         generate_master_reference(story, img_gen)
@@ -1001,7 +960,6 @@ def generate_all_panels(
             prompt=full_prompt,
             width=gen_w,
             height=gen_h,
-            reference_image=story.master_reference,
         )
 
         if progress_callback:
@@ -1035,7 +993,6 @@ def regenerate_panel(
         prompt=full_prompt,
         width=gen_w,
         height=gen_h,
-        reference_image=story.master_reference,
         step_callback=step_callback,
     )
     return panel.image

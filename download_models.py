@@ -4,7 +4,7 @@ from huggingface_hub import snapshot_download
 def download_models():
     models = [
         "Qwen/Qwen2.5-7B-Instruct",
-        "baidu/ERNIE-Image-Turbo"
+        "black-forest-labs/FLUX.1-dev"
     ]
     
     token = os.environ.get("HF_TOKEN")
@@ -19,7 +19,6 @@ def download_models():
                 repo_id=model_id,
                 token=token,
                 resume_download=True,
-                # For ERNIE-Image-Turbo, we want all files including the large transformer shards
             )
             print(f"\nSUCCESS: {model_id} is fully downloaded and cached.")
         except Exception as e:
