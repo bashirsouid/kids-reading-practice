@@ -1,8 +1,9 @@
 /**
  * StyleReferencePage - Step 3: Select art style and generate master reference image.
  * 
- * Purpose: Allow users to select art style and manage character descriptions.
+ * Purpose: Allow users to select art style and preview the reference prompt.
  * Generates master reference image for character consistency across panels.
+ * The reference is generated from the synopsis + characters + selected style.
  * Proceeding advances job to the panel breakdown step.
  * 
  * Route: /styleReference
@@ -12,10 +13,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generateMasterReference, updateArtStyle, updateCharacters } from '../services/api';
+import { proceedToNextStage, generateMasterReference, updateArtStyle } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
-import { CharacterList } from '../components/character/CharacterList';
 import { Button } from '../components/ui/Button';
 import { useWebSocket } from '../hooks/useWebSocket';
 
@@ -23,9 +23,6 @@ export function StyleReferencePage() {
   const navigate = useNavigate();
   const { state, dispatch } = useWizard();
   const [artStyle, setArtStyle] = useState(state.story?.art_style || 'Modern Pixar 3D animation style');
-  const [characters, setCharacters] = useState(
-    state.story?.characters || []
-  );
   const [isGeneratingRef, setIsGeneratingRef] = useState(false);
   // Initialize based on whether the story already has a reference image
   const [hasReference, setHasReference] = useState(
@@ -36,6 +33,36 @@ export function StyleReferencePage() {
   const [refProgress, setRefProgress] = useState<{ step: number; totalSteps: number } | null>(null);
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
+
+  // Generate the reference prompt preview based on synopsis and characters
+  const generateReferencePromptPreview = (): string => {
+    if (!state.story) return '';
+    
+    const synopsis = state.story.synopsis || '';
+    const synopsisContext = synopsis.substring(0, 200);
+    
+    let charDesc = '';
+    if (state.story.characters && state.story.characters.length > 0) {
+      const charList = state.story.characters
+        .map((c: any) => `${c.name}: ${c.description}`)
+        .join('. ');
+      const charNames = state.story.characters.map((c: any) => c.name).join(', ');
+      charDesc = `Characters in scene: ${charList}. All of them (${charNames}) present.`;
+    } else {
+      charDesc = `Characters: ${state.story.character_bible || ''}`;
+    }
+    
+    const sceneContext = synopsisContext
+      ? `Opening scene from the story: ${synopsisContext} Show the characters positioned naturally as if starting the adventure, with natural poses and body language reflecting the story mood.`
+      : 'Show the characters positioned naturally together with natural poses and body language.';
+    
+    const prompt = 
+      `${artStyle}, establishing shot, ${sceneContext} ` +
+      `Full-body view of all characters together, clear faces and distinguishing features, ` +
+      `natural lighting, high quality illustration, no text, no labels. ${charDesc}`;
+    
+    return prompt;
+  };
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'styleReference' });
@@ -118,40 +145,15 @@ export function StyleReferencePage() {
   };
 
   const handleCharacterUpdate = async (idx: number, field: 'name' | 'description', value: string) => {
-    const newChars = [...characters];
-    newChars[idx] = { ...newChars[idx], [field]: value };
-    setCharacters(newChars);
-    if (state.jobId) {
-      try {
-        await updateCharacters(state.jobId, newChars);
-      } catch (err) {
-        console.error('Failed to sync character update', err);
-      }
-    }
+    // Removed: character management is now handled by synopsis + structured characters
   };
 
   const handleAddCharacter = async () => {
-    const newChars = [...characters, { name: `Character ${characters.length + 1}`, description: '' }];
-    setCharacters(newChars);
-    if (state.jobId) {
-      try {
-        await updateCharacters(state.jobId, newChars);
-      } catch (err) {
-        console.error('Failed to sync character add', err);
-      }
-    }
+    // Removed: character management is now handled by synopsis + structured characters
   };
 
   const handleRemoveCharacter = async (idx: number) => {
-    const newChars = characters.filter((_, i) => i !== idx);
-    setCharacters(newChars);
-    if (state.jobId) {
-      try {
-        await updateCharacters(state.jobId, newChars);
-      } catch (err) {
-        console.error('Failed to sync character remove', err);
-      }
-    }
+    // Removed: character management is now handled by synopsis + structured characters
   };
 
   const handleBack = () => {
@@ -167,21 +169,21 @@ export function StyleReferencePage() {
     <div className="main-layout">
       <div className="form-section">
         <div className="text-xs text-text-dim mb-3">Step 3: Style & Reference</div>
-        <h2 className="text-xl text-gold mb-4">🎨 Style & Character Reference</h2>
+        <h2 className="text-xl text-gold mb-4">🎨 Style & Reference Image</h2>
 
         <div className="mb-4">
           <label className="text-sm font-semibold text-text-dim mb-2 block">Art Style</label>
           <ArtStyleSelector selectedStyle={artStyle} onSelect={handleStyleSelect} />
         </div>
 
-        <div className="mb-4">
-          <div className="text-sm font-semibold text-text-dim mb-2">Character Descriptions</div>
-          <CharacterList
-            characters={characters}
-            onUpdate={handleCharacterUpdate}
-            onAdd={handleAddCharacter}
-            onRemove={handleRemoveCharacter}
-          />
+        <div className="mb-6 p-4 bg-bg border border-border rounded-lg">
+          <div className="text-sm font-semibold text-text-dim mb-3">Reference Prompt Preview</div>
+          <div className="text-sm text-text-secondary leading-relaxed bg-bg-darker p-3 rounded border border-border-dim max-h-32 overflow-y-auto font-mono text-xs">
+            {generateReferencePromptPreview()}
+          </div>
+          <div className="text-xs text-text-dim mt-2">
+            This prompt will be used to generate the opening establishing frame showing all characters in the story's opening scene.
+          </div>
         </div>
 
         <WizardNav

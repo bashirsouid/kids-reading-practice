@@ -905,6 +905,47 @@ def _panel_prompt(story: ComicStory, panel: Panel) -> str:
     )
 
 
+def _generate_reference_prompt(story: ComicStory) -> str:
+    """Generate a synopsis-driven reference prompt for the master reference image.
+
+    Instead of a generic "standing together" scene, this creates a prompt based on
+    the story's opening context from the synopsis, so the reference image serves as
+    an establishing frame that captures the story's setting and character poses
+    relevant to the narrative.
+
+    Returns the full reference generation prompt with art style, scene context,
+    characters, and quality directives.
+    """
+    # Extract scene context from synopsis (first 1-2 sentences give opening context)
+    synopsis_context = story.synopsis[:200] if story.synopsis else ""
+    
+    # Build character descriptions
+    if story.characters:
+        char_list_str = ". ".join([f"{c.name}: {c.description}" for c in story.characters])
+        char_names = ", ".join([c.name for c in story.characters])
+        char_desc = f"Characters in scene: {char_list_str}. All of them ({char_names}) present."
+    else:
+        char_desc = f"Characters: {story.character_bible}"
+
+    # Build a scene description based on synopsis context
+    scene_context = (
+        f"Opening scene from the story: {synopsis_context} "
+        f"Show the characters positioned naturally as if starting the adventure, "
+        f"with natural poses and body language reflecting the story mood. "
+    )
+
+    # Construct the full reference prompt
+    prompt = (
+        f"{story.art_style}, establishing shot, "
+        f"{scene_context}"
+        f"Full-body view of all characters together, clear faces and distinguishing features, "
+        f"natural lighting, high quality illustration, no text, no labels. "
+        f"{char_desc}"
+    )
+
+    return prompt
+
+
 def generate_master_reference(
     story: ComicStory,
     img_gen: "ImageGenerator",
@@ -912,27 +953,18 @@ def generate_master_reference(
 ) -> Image.Image:
     """Generate the hidden master character reference image.
 
-    The reference is text2img only and shows every character standing together.
-    It is used as the IP-Adapter conditioning image for every panel.
+    The reference is text2img only and shows every character together in a scene
+    derived from the story's opening context (synopsis). The reference image serves
+    as the opening establishing frame and is used as the IP-Adapter conditioning
+    image for every panel to ensure character consistency.
     """
     gen_w, gen_h = _panel_gen_dims(0)
 
-    # Build a character description block from structured characters if available
-    if story.characters:
-        char_list_str = ". ".join([f"{c.name}: {c.description}" for c in story.characters])
-        char_names = ", ".join([c.name for c in story.characters])
-        char_desc = f"Characters: {char_list_str}. All of them ({char_names}) are in the frame."
-    else:
-        char_desc = f"Characters: {story.character_bible}"
+    # Generate reference prompt based on synopsis + characters + style
+    prompt = _generate_reference_prompt(story)
 
-    prompt = (
-        f"{story.art_style}, a single group illustration showing all the characters "
-        f"together in one frame, full body view, standing side-by-side, friendly poses, "
-        f"plain neutral background, soft daylight, clear faces, high quality, "
-        f"no text, no labels. {char_desc}"
-    )
-
-    logger.info("Generating master character reference image...")
+    logger.info("Generating master character reference image from synopsis context...")
+    logger.debug(f"Reference prompt: {prompt[:150]}...")
     img = img_gen.generate(
         prompt=prompt,
         width=gen_w,
