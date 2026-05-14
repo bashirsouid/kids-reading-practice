@@ -90,6 +90,7 @@ from generator import (
     render_page,
     generate_all_panels,
     regenerate_panel,
+    generate_master_reference,
     _panel_gen_dims,
     _panel_prompt,
 )
@@ -659,6 +660,67 @@ def _image_to_base64(img, max_size: int = 512) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+# ── Image Generation Progress Broadcasting ───────────────────────────────────
+async def broadcast_image_generating(job: ComicJob, target: str, panel_index: int | None = None):
+    """Notify clients that image generation has started (blank the old image)."""
+    data = {
+        "type": "image_generating",
+        "job_id": job.job_id,
+        "target": target,  # "reference" or "panel"
+        "panel_index": panel_index,
+    }
+    message = json.dumps(data)
+    ws_list = active_websockets.get(job.job_id, [])
+    disconnected = []
+    for ws in ws_list:
+        try:
+            await ws.send_text(message)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        ws_list.remove(ws)
+
+
+async def broadcast_image_progress(job: ComicJob, target: str, step: int, total_steps: int, panel_index: int | None = None):
+    """Notify clients of step-level image generation progress."""
+    data = {
+        "type": "image_progress",
+        "job_id": job.job_id,
+        "target": target,  # "reference" or "panel"
+        "panel_index": panel_index,
+        "step": step,
+        "total_steps": total_steps,
+    }
+    message = json.dumps(data)
+    ws_list = active_websockets.get(job.job_id, [])
+    disconnected = []
+    for ws in ws_list:
+        try:
+            await ws.send_text(message)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        ws_list.remove(ws)
+
+
+def _make_step_callback(job: ComicJob, target: str, panel_index: int | None = None):
+    """Create a thread-safe step callback for image generation.
+    
+    The callback is invoked from executor threads, so it dispatches
+    the WebSocket broadcast back to the event loop via
+    asyncio.run_coroutine_threadsafe.
+    """
+    loop = asyncio.get_event_loop()
+
+    def step_cb(step: int, total_steps: int):
+        asyncio.run_coroutine_threadsafe(
+            broadcast_image_progress(job, target, step, total_steps, panel_index),
+            loop,
+        )
+
+    return step_cb
+
+
 # ── WebSocket Broadcasting ───────────────────────────────────────────────────
 async def broadcast_job_update(job: ComicJob):
     """Send job status update to all connected WebSocket clients.
@@ -992,8 +1054,12 @@ async def api_regenerate_panel(req: RegeneratePanelRequest):
     if req.panel_index < 0 or req.panel_index >= len(job.story.panels):
         raise HTTPException(status_code=400, detail="Invalid panel index")
 
+    # Signal the frontend to blank out the old panel image immediately
+    await broadcast_image_generating(job, "panel", req.panel_index)
+
     loop = asyncio.get_event_loop()
     modification = req.modification if req.modification else None
+    step_cb = _make_step_callback(job, "panel", req.panel_index)
 
     await loop.run_in_executor(
         None,
@@ -1002,6 +1068,7 @@ async def api_regenerate_panel(req: RegeneratePanelRequest):
         req.panel_index,
         img_gen,
         modification,
+        step_cb,
     )
 
     # Update thumbnail
@@ -1009,6 +1076,7 @@ async def api_regenerate_panel(req: RegeneratePanelRequest):
     if panel.image:
         job.panel_thumbnails[req.panel_index] = _image_to_base64(panel.image, max_size=256)
     save_jobs()
+    await broadcast_job_update(job)
 
     return {"status": "ok", "panel_index": req.panel_index}
 
@@ -1178,13 +1246,17 @@ async def _generate_reference_task(job: ComicJob):
     job.error = None
     await broadcast_job_update(job)
     
-    from generator import generate_master_reference
+    # Signal the frontend to blank out any existing reference image
+    await broadcast_image_generating(job, "reference")
     
     try:
         logger.info(f"Job {job.job_id}: generating master character reference...")
         log_system_resources(f"JOB-{job.job_id}-MASTER-REF")
         
-        await loop.run_in_executor(None, generate_master_reference, job.story, img_gen)
+        step_cb = _make_step_callback(job, "reference")
+        await loop.run_in_executor(
+            None, generate_master_reference, job.story, img_gen, step_cb
+        )
         await asyncio.sleep(0.5)
         
         job.progress_current = 1
@@ -1275,13 +1347,19 @@ async def _generate_panels_task(job: ComicJob):
             
             log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
             
-            def generate_single_panel(p=panel):
+            # Signal the frontend to show a generating placeholder for this panel
+            await broadcast_image_generating(job, "panel", panel.index)
+            
+            step_cb = _make_step_callback(job, "panel", panel.index)
+
+            def generate_single_panel(p=panel, cb=step_cb):
                 gen_w, gen_h = _panel_gen_dims(p.index)
                 p.image = img_gen.generate(
                     prompt=_panel_prompt(story, p),
                     width=gen_w,
                     height=gen_h,
                     reference_image=story.master_reference,
+                    step_callback=cb,
                 )
             
             await loop.run_in_executor(None, generate_single_panel)

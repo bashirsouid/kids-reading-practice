@@ -10,5 +10,4 @@ node_modules/
 dist/
 build/
 WORKFLOW_CHANGES_TODO.md
-static/
 .aider*

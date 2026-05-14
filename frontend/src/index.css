@@ -198,3 +198,81 @@ h1, h2, h3, .comic-title {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ── Image Generation Progress Overlay ────────────────────────────────── */
+.gen-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 15, 26, 0.85);
+  backdrop-filter: blur(4px);
+  z-index: 5;
+}
+
+.gen-overlay-inline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.gen-progress-ring-container {
+  position: relative;
+  width: 60px;
+  height: 60px;
+}
+
+.gen-progress-ring-container.gen-progress-ring-lg {
+  width: 80px;
+  height: 80px;
+}
+
+.gen-progress-ring {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.gen-progress-ring-track {
+  stroke: rgba(255, 255, 255, 0.1);
+}
+
+.gen-progress-ring-fill {
+  stroke: var(--accent);
+  transition: stroke-dashoffset 0.4s ease;
+  filter: drop-shadow(0 0 6px rgba(233, 69, 96, 0.5));
+}
+
+.gen-progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+}
+
+.gen-progress-text.gen-progress-text-lg {
+  font-size: 0.9rem;
+}
+
+.gen-label {
+  margin-top: 6px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent);
+  animation: genPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes genPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}

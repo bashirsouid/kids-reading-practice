@@ -670,6 +670,7 @@ class ImageGenerator:
         guidance: float = 0.0,
         reference_image: Optional[Image.Image] = None,
         ip_scale: float = IP_ADAPTER_SCALE,
+        step_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Image.Image:
         """Generate an image from a text prompt.
 
@@ -683,6 +684,9 @@ class ImageGenerator:
         guidance defaults to 0 because SDXL-Lightning was distilled
         without classifier-free guidance; setting it >1 produces over-
         saturated, broken outputs.
+
+        step_callback, if provided, is called after each inference step
+        with (current_step, total_steps) to report progress.
         """
         import gc
 
@@ -722,6 +726,17 @@ class ImageGenerator:
                 self.pipe.set_ip_adapter_scale(0.0)
                 ip_kwargs = {}
 
+            # Build a diffusers-compatible step-end callback that adapts to
+            # our simpler (step, total) signature.
+            cb_kwargs = {}
+            if step_callback is not None:
+                total_steps = steps
+                def _on_step_end(pipe, step_index, timestep, callback_kwargs):
+                    # step_index is 0-based; report 1-based for the UI
+                    step_callback(step_index + 1, total_steps)
+                    return callback_kwargs
+                cb_kwargs["callback_on_step_end"] = _on_step_end
+
             with torch.inference_mode():
                 result = self.pipe(
                     prompt=prompt,
@@ -731,6 +746,7 @@ class ImageGenerator:
                     guidance_scale=guidance,
                     generator=torch.Generator(device=DEVICE).manual_seed(seed),
                     **ip_kwargs,
+                    **cb_kwargs,
                 )
             logger.info(f"Image generation complete for prompt: {prompt[:50]}...")
 
@@ -890,6 +906,7 @@ def _panel_prompt(story: ComicStory, panel: Panel) -> str:
 def generate_master_reference(
     story: ComicStory,
     img_gen: "ImageGenerator",
+    step_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Image.Image:
     """Generate the hidden master character reference image.
 
@@ -917,6 +934,7 @@ def generate_master_reference(
         width=gen_w,
         height=gen_h,
         reference_image=None,
+        step_callback=step_callback,
     )
     story.master_reference = img
     logger.info("Master reference ready.")
@@ -959,6 +977,7 @@ def regenerate_panel(
     panel_index: int,
     img_gen: ImageGenerator,
     modification: Optional[str] = None,
+    step_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Image.Image:
     """Regenerate a single panel, optionally with a text modification."""
     panel = story.panels[panel_index]
@@ -981,5 +1000,6 @@ def regenerate_panel(
         width=gen_w,
         height=gen_h,
         reference_image=story.master_reference,
+        step_callback=step_callback,
     )
     return panel.image

@@ -17,7 +17,6 @@ import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
 import { CharacterList } from '../components/character/CharacterList';
 import { Button } from '../components/ui/Button';
-import { Spinner } from '../components/ui/Spinner';
 import { useWebSocket } from '../hooks/useWebSocket';
 
 export function StyleReferencePage() {
@@ -33,6 +32,8 @@ export function StyleReferencePage() {
     !!state.story?.master_reference
   );
   const [error, setError] = useState<string | null>(null);
+  /** Step-level progress during reference image generation */
+  const [refProgress, setRefProgress] = useState<{ step: number; totalSteps: number } | null>(null);
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
@@ -51,10 +52,25 @@ export function StyleReferencePage() {
       // or the stage has moved to panel_breakdown
       setHasReference(true);
       setIsGeneratingRef(false);
+      setRefProgress(null);
     },
     onError: (msg) => {
       setError(msg);
       setIsGeneratingRef(false);
+      setRefProgress(null);
+    },
+    onImageGenerating: (target) => {
+      if (target === 'reference') {
+        // Blank out the old reference image and show generating state
+        setHasReference(false);
+        setIsGeneratingRef(true);
+        setRefProgress(null);
+      }
+    },
+    onImageProgress: (target, _panelIndex, step, totalSteps) => {
+      if (target === 'reference') {
+        setRefProgress({ step, totalSteps });
+      }
     },
   });
 
@@ -76,6 +92,8 @@ export function StyleReferencePage() {
   const handleGenerateReference = async () => {
     if (!state.jobId) return;
     setIsGeneratingRef(true);
+    setHasReference(false);
+    setRefProgress(null);
     setError(null);
     try {
       await updateArtStyle(state.jobId, artStyle);
@@ -116,6 +134,11 @@ export function StyleReferencePage() {
   const handleBack = () => {
     navigate(projectPath('storyContent'));
   };
+
+  // Calculate progress percentage for the ring
+  const progressPercent = refProgress
+    ? (refProgress.step / refProgress.totalSteps) * 100
+    : 0;
 
   return (
     <div className="main-layout">
@@ -174,15 +197,48 @@ export function StyleReferencePage() {
               </div>
             ) : (
               <div>
-                {isGeneratingRef && <Spinner className="mx-auto mb-3" />}
-                <p className="text-text-dim text-sm mb-3">
-                  {isGeneratingRef
-                    ? 'Generating reference image... This may take a minute.'
-                    : 'Click to generate the master reference image'
-                  }
-                </p>
-                {!isGeneratingRef && (
+                {isGeneratingRef ? (
+                  <div className="flex flex-col items-center py-8">
+                    <div className="gen-overlay-inline">
+                      <div className="gen-progress-ring-container gen-progress-ring-lg">
+                        <svg className="gen-progress-ring" viewBox="0 0 80 80">
+                          <circle
+                            className="gen-progress-ring-track"
+                            cx="40" cy="40" r="34"
+                            fill="none"
+                            strokeWidth="5"
+                          />
+                          <circle
+                            className="gen-progress-ring-fill"
+                            cx="40" cy="40" r="34"
+                            fill="none"
+                            strokeWidth="5"
+                            strokeDasharray={`${2 * Math.PI * 34}`}
+                            strokeDashoffset={`${2 * Math.PI * 34 * (1 - progressPercent / 100)}`}
+                            strokeLinecap="round"
+                          />
+                        </svg>
+                        <div className="gen-progress-text gen-progress-text-lg">
+                          {refProgress
+                            ? `${refProgress.step}/${refProgress.totalSteps}`
+                            : '...'}
+                        </div>
+                      </div>
+                    </div>
+                    <p className="text-text-dim text-sm mt-4">
+                      Generating reference image...
+                      {refProgress && (
+                        <span className="text-accent ml-1">
+                          Step {refProgress.step} of {refProgress.totalSteps}
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                ) : (
                   <>
+                    <p className="text-text-dim text-sm mb-3">
+                      Click to generate the master reference image
+                    </p>
                     <Button variant="primary" onClick={handleGenerateReference}>🖼️ Generate Reference Image</Button>
                     <p className="text-text-dim text-xs mt-3">
                       The reference image ensures character consistency across all panels

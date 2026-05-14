@@ -3,13 +3,14 @@
  * 
  * Purpose: Generate images for all 6 panels using the art style and descriptions.
  * Displays panel preview grid and progress indicator during generation.
+ * Shows per-panel step-level progress via WebSocket.
  * Proceeding advances job to "complete" stage.
  * 
  * Route: /panelImages
  * 
  * Note: This step generates the actual panel images. Next should only proceed after images ready.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
 import { proceedToNextStage, generatePanels, getJobStatus } from '../services/api';
@@ -19,6 +20,7 @@ import { ProgressBar } from '../components/ui/ProgressBar';
 import { PanelGrid } from '../components/panel/PanelGrid';
 import { ErrorMessage } from '../components/ui/ErrorMessage';
 import { useWebSocket } from '../hooks/useWebSocket';
+import type { PanelGenerationProgress } from '../components/panel/PanelCard';
 
 export function PanelImagesPage() {
   const navigate = useNavigate();
@@ -29,8 +31,37 @@ export function PanelImagesPage() {
   const [isComplete, setIsComplete] = useState(false);
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
+  /** Per-panel generation state: maps panel index to progress or true (started, no steps yet). */
+  const [generatingPanels, setGeneratingPanels] = useState<Record<number, PanelGenerationProgress | true>>({});
+
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'panelImages' });
+  }, []);
+
+  const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
+    if (target === 'panel' && panelIndex !== null) {
+      // Blank out the old panel image and show generating overlay
+      setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
+      // Mark the panel as not having an image in the story state
+      if (state.story?.panels) {
+        const updatedPanels = state.story.panels.map((p, i) =>
+          i === panelIndex ? { ...p, has_image: false } : p
+        );
+        dispatch({
+          type: 'SET_STORY',
+          payload: { ...state.story, panels: updatedPanels },
+        });
+      }
+    }
+  }, [state.story, dispatch]);
+
+  const handleImageProgress = useCallback((target: 'reference' | 'panel', panelIndex: number | null, step: number, totalSteps: number) => {
+    if (target === 'panel' && panelIndex !== null) {
+      setGeneratingPanels(prev => ({
+        ...prev,
+        [panelIndex]: { step, totalSteps },
+      }));
+    }
   }, []);
 
   // Listen for WebSocket updates for panel generation progress
@@ -51,17 +82,33 @@ export function PanelImagesPage() {
           ...storyUpdate,
         },
       });
+      // Clear generating state for panels that now have images
+      if (storyUpdate.panels) {
+        setGeneratingPanels(prev => {
+          const next = { ...prev };
+          for (const p of storyUpdate.panels!) {
+            if (p.has_image && next[p.index] !== undefined) {
+              delete next[p.index];
+            }
+          }
+          return next;
+        });
+      }
     },
     onStageChange: (stage) => {
       if (stage === 'complete') {
         setIsGenerating(false);
         setIsComplete(true);
+        setGeneratingPanels({});
       }
     },
     onError: (msg) => {
       setError(msg);
       setIsGenerating(false);
+      setGeneratingPanels({});
     },
+    onImageGenerating: handleImageGenerating,
+    onImageProgress: handleImageProgress,
   });
 
   useEffect(() => {
@@ -145,6 +192,10 @@ export function PanelImagesPage() {
   const allPanelsHaveImages = panels.length === 6 && panelsWithoutImages === 0 && !hasPlaceholders;
   const generatingPanelNumber = Math.min(progress.current + 1, progress.total || 1);
 
+  // Find active panel step progress to display in the overall status
+  const activeGenEntries = Object.entries(generatingPanels);
+  const activeGenPanel = activeGenEntries.find(([_, v]) => v !== true);
+
   const handleNext = async () => {
     if (state.jobId) {
       await proceedToNextStage(state.jobId);
@@ -189,6 +240,11 @@ export function PanelImagesPage() {
                 ? 'Finishing panel generation...'
                 : `Generating panel ${generatingPanelNumber} of ${progress.total}...`}
             </p>
+            {activeGenPanel && (activeGenPanel[1] as { step: number; totalSteps: number }) && (
+              <p className="text-accent text-xs text-center mt-1">
+                Step {(activeGenPanel[1] as { step: number; totalSteps: number }).step} of {(activeGenPanel[1] as { step: number; totalSteps: number }).totalSteps} inference steps
+              </p>
+            )}
             {progress.current > 0 && (
               <p className="text-green-300 text-xs text-center mt-1">
                 {progress.current} panel{progress.current === 1 ? '' : 's'} ready
@@ -230,7 +286,11 @@ export function PanelImagesPage() {
               <span className="zoom-display">100%</span>
               <Button variant="secondary" size="sm">+</Button>
             </div>
-            <PanelGrid panels={panels} jobId={state.jobId} />
+            <PanelGrid
+              panels={panels}
+              jobId={state.jobId}
+              generatingPanels={generatingPanels}
+            />
           </>
         )}
       </div>

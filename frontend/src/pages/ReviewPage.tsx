@@ -3,23 +3,73 @@
  * 
  * Purpose: Display final comic panels with export options (PNG).
  * Provides navigation back to previous step for edits.
+ * Supports per-panel regeneration progress display.
  * 
  * Route: /review
  */
-import React, { useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
 import { PanelGrid } from '../components/panel/PanelGrid';
 import { Button } from '../components/ui/Button';
+import { useWebSocket } from '../hooks/useWebSocket';
+import type { PanelGenerationProgress } from '../components/panel/PanelCard';
 
 export function ReviewPage() {
   const navigate = useNavigate();
   const { state, dispatch } = useWizard();
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
+  /** Per-panel generation state for regeneration progress. */
+  const [generatingPanels, setGeneratingPanels] = useState<Record<number, PanelGenerationProgress | true>>({});
+
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'review' });
   }, []);
+
+  const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
+    if (target === 'panel' && panelIndex !== null) {
+      setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
+    }
+  }, []);
+
+  const handleImageProgress = useCallback((target: 'reference' | 'panel', panelIndex: number | null, step: number, totalSteps: number) => {
+    if (target === 'panel' && panelIndex !== null) {
+      setGeneratingPanels(prev => ({
+        ...prev,
+        [panelIndex]: { step, totalSteps },
+      }));
+    }
+  }, []);
+
+  // Listen for regeneration updates
+  useWebSocket({
+    jobId: state.jobId || '',
+    onStoryUpdate: (storyUpdate) => {
+      if (!storyUpdate) return;
+      dispatch({
+        type: 'SET_STORY',
+        payload: {
+          ...(state.story || {}),
+          ...storyUpdate,
+        },
+      });
+      // Clear generating state for panels that now have images
+      if (storyUpdate.panels) {
+        setGeneratingPanels(prev => {
+          const next = { ...prev };
+          for (const p of storyUpdate.panels!) {
+            if (p.has_image && next[p.index] !== undefined) {
+              delete next[p.index];
+            }
+          }
+          return next;
+        });
+      }
+    },
+    onImageGenerating: handleImageGenerating,
+    onImageProgress: handleImageProgress,
+  });
 
   const handleExportPNG = () => {
     if (state.jobId) {
@@ -64,7 +114,13 @@ export function ReviewPage() {
           <span className="zoom-display">100%</span>
           <Button variant="secondary" size="sm">+</Button>
         </div>
-        {state.story?.panels && <PanelGrid panels={state.story.panels} jobId={state.jobId} />}
+        {state.story?.panels && (
+          <PanelGrid
+            panels={state.story.panels}
+            jobId={state.jobId}
+            generatingPanels={generatingPanels}
+          />
+        )}
       </div>
     </div>
   );

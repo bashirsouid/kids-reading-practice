@@ -19,7 +19,7 @@ interface WebSocketMessage {
   progress_total?: number;
   error?: string;
   has_reference?: boolean;
-  type?: 'progress' | 'complete' | 'error';
+  type?: 'progress' | 'complete' | 'error' | 'ping' | 'image_progress' | 'image_generating';
   message?: string;
   reference_ready?: boolean;
   story?: {
@@ -38,6 +38,11 @@ interface WebSocketMessage {
     }>;
   };
   wait_for_user?: boolean;
+  // Image generation progress fields
+  target?: 'reference' | 'panel';
+  panel_index?: number | null;
+  step?: number;
+  total_steps?: number;
 }
 
 interface UseWebSocketOptions {
@@ -48,6 +53,10 @@ interface UseWebSocketOptions {
   onStoryUpdate?: (story: WebSocketMessage['story']) => void;
   onSlugUpdate?: (slug: string) => void;
   onStageChange?: (stage: string) => void;
+  /** Called when an image generation starts — UI should blank out the old image. */
+  onImageGenerating?: (target: 'reference' | 'panel', panelIndex: number | null) => void;
+  /** Called after each diffusion inference step with step-level progress. */
+  onImageProgress?: (target: 'reference' | 'panel', panelIndex: number | null, step: number, totalSteps: number) => void;
 }
 
 export function useWebSocket({
@@ -58,6 +67,8 @@ export function useWebSocket({
    onStoryUpdate,
    onSlugUpdate,
    onStageChange,
+   onImageGenerating,
+   onImageProgress,
   }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -69,7 +80,9 @@ export function useWebSocket({
     onReferenceReady,
     onStoryUpdate,
     onSlugUpdate,
-    onStageChange
+    onStageChange,
+    onImageGenerating,
+    onImageProgress,
   });
 
   // Keep the ref updated with the latest callbacks
@@ -80,9 +93,11 @@ export function useWebSocket({
       onReferenceReady,
       onStoryUpdate,
       onSlugUpdate,
-      onStageChange
+      onStageChange,
+      onImageGenerating,
+      onImageProgress,
     };
-  }, [onProgress, onError, onReferenceReady, onStoryUpdate, onSlugUpdate, onStageChange]);
+  }, [onProgress, onError, onReferenceReady, onStoryUpdate, onSlugUpdate, onStageChange, onImageGenerating, onImageProgress]);
 
   const connect = useCallback(() => {
     if (!jobId) return;
@@ -100,7 +115,30 @@ export function useWebSocket({
     wsRef.current.onmessage = (event) => {
       try {
         const data: WebSocketMessage = JSON.parse(event.data);
-        const { onProgress, onError, onReferenceReady, onStoryUpdate, onSlugUpdate, onStageChange } = callbacksRef.current;
+        const {
+          onProgress, onError, onReferenceReady, onStoryUpdate,
+          onSlugUpdate, onStageChange, onImageGenerating, onImageProgress,
+        } = callbacksRef.current;
+
+        // Handle image generation started (blank out old image)
+        if (data.type === 'image_generating') {
+          onImageGenerating?.(
+            data.target || 'panel',
+            data.panel_index ?? null,
+          );
+          return;
+        }
+
+        // Handle step-level image generation progress
+        if (data.type === 'image_progress') {
+          onImageProgress?.(
+            data.target || 'panel',
+            data.panel_index ?? null,
+            data.step || 0,
+            data.total_steps || 1,
+          );
+          return;
+        }
 
         // Handle server format (from comic-server broadcast_job_update)
         // Check for error first
