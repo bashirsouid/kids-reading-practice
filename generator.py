@@ -828,38 +828,164 @@ def _panel_gen_dims(panel_index: int) -> tuple[int, int]:
     return gen_w, gen_h
 
 
+def _build_character_profiles(characters: list[Character], art_style: str) -> str:
+    """Build detailed, visually distinct character profiles for prompt injection.
+
+    Each character gets an explicit visual identity block that emphasizes
+    uniqueness — the LLM-generated descriptions are often too generic,
+    causing characters to look alike (e.g., villagers becoming clones of Yuki).
+    This function adds differentiation instructions and expands brief
+    descriptions into full visual profiles.
+    """
+    if not characters:
+        return ""
+
+    profiles = []
+    for i, c in enumerate(characters):
+        name = c.name
+        desc = c.description.strip()
+
+        # Build a rich visual profile for each character.
+        # We explicitly call out that this character must look DIFFERENT
+        # from all others, and we add distinguishing visual anchors.
+        profile = (
+            f"{i + 1}. {name}:"
+            f" {desc}"
+        )
+
+        # If description is short, note it needs elaboration in the prompt
+        if len(desc) < 50:
+            profile += (
+                f" Give {name} a UNIQUE and visually distinct appearance "
+                f"that is clearly different from every other character — "
+                f"different body type, clothing, colors, and features."
+            )
+
+        profiles.append(profile)
+
+    # Add cross-character differentiation directive
+    names = [c.name for c in characters]
+    differentiator = (
+        f"IMPORTANT — CHARACTER DIFFERENTIATION: "
+        f"All {len(characters)} characters ({', '.join(names)}) must have visually DISTINCT appearances. "
+        f"No two characters should look alike. Differentiate them through "
+        f"species, body proportions, height, dominant colors, clothing style, "
+        f"hairstyle, accessories, and any other visual features. "
+        f"If the story includes background characters or villagers, they must "
+        f"also look different from the main characters and from each other."
+    )
+
+    return "\n".join(profiles) + "\n\n" + differentiator
+
+
+def _build_story_context_block(story: ComicStory, panel: Panel, panel_index: int) -> str:
+    """Build a narrative context block that tells the model where this panel
+    sits in the overall story arc.
+
+    FLUX's long context window allows us to include the full synopsis,
+    the panel's position in the story, and surrounding panel summaries.
+    This dramatically improves story consistency because the model
+    understands the narrative flow rather than generating isolated scenes.
+    """
+    total_panels = len(story.panels)
+
+    # Build a concise summary of all panels for narrative anchoring
+    panel_summaries = []
+    for p in story.panels:
+        char_names = ", ".join(p.characters) if p.characters else "no characters specified"
+        # Show the panel scene briefly (capped at ~80 chars)
+        scene_preview = p.image_prompt[:80] + ("..." if len(p.image_prompt) > 80 else "")
+        panel_summaries.append(
+            f"  Panel {p.index + 1}: {scene_preview} [{char_names}]"
+        )
+
+    context = (
+        f"STORY SYNOPSIS: \"{story.synopsis}\"\n"
+        f"\n"
+        f"PANEL POSITION: Panel {panel_index + 1} of {total_panels}.\n"
+        f"\n"
+        f"FULL STORY OUTLINE:\n"
+    )
+    for summary in panel_summaries:
+        context += summary + "\n"
+
+    context += (
+        f"\n"
+        f"CURRENT PANEL: Panel {panel_index + 1} specifically depicts: {panel.image_prompt}\n"
+        f"Characters in THIS panel: {', '.join(panel.characters) if panel.characters else 'none specified'}\n"
+        f"\n"
+        f"IMPORTANT: This panel is one frame in a sequential story. "
+        f"The scene should flow naturally from the previous panels and lead into the next ones. "
+        f"Do NOT generate a random standalone scene — every element must serve the narrative. "
+        f"Match the art style, character appearances, and world established in the reference image."
+    )
+
+    return context
+
+
 def _panel_prompt(story: ComicStory, panel: Panel) -> str:
-     """Build the image prompt for a single panel.
+    """Build the image prompt for a single panel with maximum consistency.
 
-     FLUX's T5-XXL text encoder excels at following detailed character
-     descriptions embedded directly in the prompt. This replaces the
-     IP-Adapter approach — instead of conditioning on a reference image,
-     we inject each character's full visual description into the text
-     prompt, ensuring consistent appearance across all panels.
-     """
-     # Build a consolidated character description block for all characters
-     # that appear in the story (not just this panel). FLUX's long-context
-     # T5 encoder handles this gracefully and maintains identity.
-     char_descriptions = []
-     if story.characters:
-         for c in story.characters:
-             char_descriptions.append(
-                 f"{c.name}: {c.description}" if c.description else c.name
-             )
-     chars_block = "; ".join(char_descriptions)
+    Strategy for FLUX.1-dev's T5-XXL encoder:
+      1. Art style directive (sets visual tone for everything)
+      2. Full story context + panel sequence position (narrative anchoring)
+      3. Specific scene description for this panel
+      4. Detailed character profiles with visual differentiation directives
+      5. Explicit cross-panel consistency reminders
 
-     # Front-load the art style, then the scene, then explicit character
-     # descriptions so the T5 encoder allocates attention to all of them.
-     prompt_parts = [
-         story.art_style,
-         panel.image_prompt,
-     ]
-     if chars_block:
-         prompt_parts.append(
-             f"Characters: {chars_block}"
-         )
+    This replaces simple comma-concatenated prompts. By embedding the
+    full story synopsis, panel sequence context, and rich character
+    profiles with differentiation instructions, FLUX generates images
+    that are narratively connected and visually consistent across panels,
+    and prevents the "clone character" problem where all background
+    characters look the same.
+    """
+    # --- Part 1: Art style ---
+    art_style = story.art_style or "modern 3D animation style, cinematic lighting, high detail"
+    # Normalize: strip trailing period/dot so it does not double-punctuate
+    art_style = art_style.rstrip(".")
 
-     return ", ".join(prompt_parts)
+    # --- Part 2: Full story context + panel position ---
+    story_context = _build_story_context_block(story, panel, panel.index)
+
+    # --- Part 3: Specific scene for this panel ---
+    panel_scene = panel.image_prompt
+
+    # --- Part 4: Rich character profiles with differentiation ---
+    char_profiles = _build_character_profiles(story.characters, art_style)
+
+    # --- Part 5: Assemble prompt ---
+    prompt_parts = [
+        f"Art style: {art_style}.",
+        "",
+        "=== STORY CONTEXT ===",
+        story_context,
+        "",
+        "=== THIS PANEL SCENE ===",
+        panel_scene,
+    ]
+
+    # Include character block only if we have profiles (the differentiation
+    # directives are critical for preventing clone-characters)
+    if char_profiles:
+        prompt_parts.extend([
+            "",
+            "=== CHARACTER IDENTITY GUIDE (MAINTAIN THESE EXACTLY) ===",
+            char_profiles,
+        ])
+
+    prompt_parts.extend([
+        "",
+        "=== CONSISTENCY RULES (FOLLOW ALL) ===",
+        f"1. All characters must match their descriptions EXACTLY in every panel — same body, same colors, same clothing.",
+        f"2. Art style and color palette must be identical across all panels.",
+        f"3. This is panel {panel.index + 1} of {len(story.panels)} — the scene must be a natural frame within the complete story.",
+        f"4. Background and setting should be consistent with the story world described in the synopsis.",
+        f"5. No two characters look alike. Every character has a unique visual identity.",
+        f"6. If a character appears in this scene, their appearance must exactly match the reference image.",
+    ])
+
+    return "\n".join(prompt_parts)
 
 
 def _generate_reference_prompt(story: ComicStory) -> str:
@@ -874,13 +1000,29 @@ def _generate_reference_prompt(story: ComicStory) -> str:
     characters, and quality directives.
     """
     # Extract scene context from synopsis (first 1-2 sentences give opening context)
-    synopsis_context = story.synopsis[:200] if story.synopsis else ""
-    
-    # Build character descriptions
+    synopsis_context = story.synopsis[:250] if story.synopsis else ""
+
+    # Build rich character descriptions with visual differentiation
     if story.characters:
-        char_list_str = ". ".join([f"{c.name}: {c.description}" for c in story.characters])
+        char_list_parts = []
+        for i, c in enumerate(story.characters):
+            desc = c.description.strip()
+            char_list_parts.append(f"{c.name}: {desc}")
+            # For characters with very brief descriptions, add differentiation guidance
+            if len(desc) < 40:
+                char_list_parts.append(
+                    f"  NOTE: {c.name} must look visually unique — "
+                    f"different species/body/clothes/colors from all other characters."
+                )
+        char_list_str = ". ".join(char_list_parts)
         char_names = ", ".join([c.name for c in story.characters])
-        char_desc = f"Characters in scene: {char_list_str}. All of them ({char_names}) present."
+        char_desc = (
+            f"Characters in scene: {char_list_str}. "
+            f"All characters ({char_names}) are present together in one establishing shot. "
+            f"Each character must have a DISTINCT visual appearance — "
+            f"different species, body shapes, heights, dominant colors, clothing, "
+            f"and accessories. No character should look like a copy of another."
+        )
     else:
         char_desc = f"Characters: {story.character_bible}"
 
@@ -889,11 +1031,15 @@ def _generate_reference_prompt(story: ComicStory) -> str:
         f"Opening scene from the story: {synopsis_context} "
         f"Show the characters positioned naturally as if starting the adventure, "
         f"with natural poses and body language reflecting the story mood. "
+        f"Position all characters clearly and distinctly so each is fully visible. "
     )
 
     # Construct the full reference prompt
+    art_style = story.art_style or "modern 3D animation style, cinematic lighting, high detail"
+    art_style = art_style.rstrip(".")
+
     prompt = (
-        f"{story.art_style}, establishing shot, "
+        f"{art_style}, establishing shot, "
         f"{scene_context}"
         f"Full-body view of all characters together, clear faces and distinguishing features, "
         f"natural lighting, high quality illustration, no text, no labels. "

@@ -62,9 +62,10 @@ def _load_models():
 async def job_worker():
     """Single-worker consumer that processes one job at a time."""
     while True:
-        job_id = await job_queue.get()
-        job = jobs.get(job_id)
+        job_id = await global_state.job_queue.get()
+        job = global_state.jobs.get(job_id)
         if not job:
+            global_state.job_queue.task_done()
             continue
 
         try:
@@ -75,7 +76,7 @@ async def job_worker():
             job.error = str(e)
             await broadcast_job_update(job)
         finally:
-            job_queue.task_done()
+            global_state.job_queue.task_done()
 
 
 async def process_job(job):

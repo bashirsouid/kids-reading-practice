@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve docker compose command (handles both "docker compose" and "docker-compose")
-if type docker compose &>/dev/null; then
-  DOCKER_COMPOSE="docker compose"
-elif type docker-compose &>/dev/null; then
-  DOCKER_COMPOSE="docker-compose"
+# Resolve docker compose command (handles both "docker compose" plugin and "docker-compose" binary)
+if command -v docker-compose &>/dev/null; then
+  dc() { docker-compose "$@"; }
+elif docker compose version &>/dev/null 2>&1; then
+  dc() { docker compose "$@"; }
 else
-  echo "Error: neither 'docker compose' nor 'docker-compose' found" >&2
+  echo "Error: neither 'docker compose' (plugin) nor 'docker-compose' (binary) found" >&2
   exit 1
 fi
 
@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
     -w|--watch)   WATCH=true; shift ;;
     -c|--clean)   CLEAN=true; shift ;;
     -b|--build)   DOCKER_ARGS+=("--build"); shift ;;
-    --no-build)   ;; # --build is default; --no-build is a no-op (kept for compatibility)
+    --no-build)   ;; # --build is default; --no-build suppresses it
     -h|--help)
       echo "Usage: $0 [OPTIONS] [-- DOCKER_COMPOSE_ARGS]"
       echo ""
@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
       echo "  -w, --watch      Start services and then watch logs (Ctrl+C stops watching, not the service)"
       echo "  -c, --clean      Clean volumes and orphaned containers before starting"
       echo "  -b, --build      Build images before starting (default: true, always passed to docker compose)"
-      echo "      --no-build   Skip image build (passed to docker compose as --no-build)"
+      echo "      --no-build   Skip image build"
       echo "  -h, --help       Show this help message"
       echo ""
       echo "Any additional arguments are passed through to docker compose."
@@ -41,8 +41,7 @@ done
 
 echo "=== Comic Generator Startup ==="
 
-# Always pass --build by default (retain original behavior)
-# But allow --no-build from DOCKER_ARGS to override
+# --build is default; --no-build in DOCKER_ARGS removes it
 BUILD_FLAGS=("--build")
 for arg in "${DOCKER_ARGS[@]}"; do
   if [[ "$arg" == "--no-build" ]]; then
@@ -54,7 +53,7 @@ done
 # Clean if requested
 if [ "$CLEAN" = true ]; then
   echo "Cleaning previous state (volumes + orphans)..."
-  "$DOCKER_COMPOSE" down -v --remove-orphans "${DOCKER_ARGS[@]}" 2>/dev/null || true
+  dc down -v --remove-orphans "${DOCKER_ARGS[@]}" 2>/dev/null || true
 fi
 
 # Build the frontend React application
@@ -63,7 +62,7 @@ cd frontend && npm run build && cd ..
 
 # Start the Docker Compose services
 echo "Starting services..."
-"$DOCKER_COMPOSE" up -d "${DOCKER_ARGS[@]}" "${BUILD_FLAGS[@]}"
+dc up -d "${DOCKER_ARGS[@]}" "${BUILD_FLAGS[@]}"
 echo "Services started."
 
 # Watch logs if requested
@@ -77,7 +76,7 @@ if [ "$WATCH" = true ]; then
     exec "$SCRIPT_DIR/watch_logs.sh"
   else
     echo "Warning: watch_logs.sh not found, falling back to docker logs"
-    CONTAINER=$("$DOCKER_COMPOSE" ps -q comic-generator 2>/dev/null | head -1)
+    CONTAINER=$(dc ps -q comic-generator 2>/dev/null | head -1) || true
     if [ -n "$CONTAINER" ]; then
       docker logs -f "$CONTAINER"
     else

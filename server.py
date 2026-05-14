@@ -1421,16 +1421,19 @@ async def api_proceed_to_next_stage(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Validate that master reference exists before proceeding past reference stage
-    if job.stage == "reference":
+
+    # Signal the process_job loop to proceed past user-wait stages
+    if job.stage == "synopsis_confirmation":
+        job.wait_for_user = False
+    elif job.stage == "reference":
         if not job.story or not job.story.master_reference:
             raise HTTPException(status_code=400, detail="Master reference not generated successfully - cannot proceed to panel breakdown")
+        job.stage = "panel_breakdown"
     elif job.stage == "panel_breakdown":
         if not job.story or not job.story.panels:
             raise HTTPException(status_code=400, detail="Panel breakdown has not been generated yet")
         job.stage = "panels"
-    
+
     job.wait_for_user = False
     logger.info(f"Job {job_id}: user requested to proceed from stage '{job.stage}'")
     save_jobs()

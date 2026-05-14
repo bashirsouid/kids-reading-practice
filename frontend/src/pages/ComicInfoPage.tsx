@@ -43,6 +43,11 @@ export function ComicInfoPage() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.error) {
+          setError(data.error);
+          setIsGenerating(false);
+          return;
+        }
         if (data.story) {
           // Store the generated story in wizard state
           dispatch({ type: 'SET_STORY', payload: {

@@ -561,12 +561,16 @@ async def api_proceed_to_next_stage(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.stage == "reference":
+    if job.stage == "synopsis_confirmation":
+        # Signal the process_job loop to proceed to reference generation
+        job.wait_for_user = False
+    elif job.stage == "reference":
         if not job.story or not job.story.master_reference:
             raise HTTPException(status_code=400, detail="Master reference not generated successfully - cannot proceed to panel breakdown")
-        elif job.stage == "panel_breakdown":
-            if not job.story or not job.story.panels:
-                raise HTTPException(status_code=400, detail="Panel breakdown has not been generated yet")
+        job.stage = "panel_breakdown"
+    elif job.stage == "panel_breakdown":
+        if not job.story or not job.story.panels:
+            raise HTTPException(status_code=400, detail="Panel breakdown has not been generated yet")
         job.stage = "panels"
 
     job.wait_for_user = False

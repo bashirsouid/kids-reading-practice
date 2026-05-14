@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve docker compose command (handles both "docker compose" and "docker-compose")
-if type docker compose &>/dev/null; then
-  DOCKER_COMPOSE="docker compose"
-elif type docker-compose &>/dev/null; then
-  DOCKER_COMPOSE="docker-compose"
+# Resolve docker compose command (handles both "docker compose" plugin and "docker-compose" binary)
+if command -v docker-compose &>/dev/null; then
+  dc() { docker-compose "$@"; }
+elif docker compose version &>/dev/null 2>&1; then
+  dc() { docker compose "$@"; }
 else
-  echo "Error: neither 'docker compose' nor 'docker-compose' found" >&2
+  echo "Error: neither 'docker compose' (plugin) nor 'docker-compose' (binary) found" >&2
   exit 1
 fi
 
@@ -48,28 +48,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Decide what to clean
+# Decide what to clean based on --no-* flags
 CLEAN_VOLUMENS=true
 CLEAN_BUILD=true
 CLEAN_OUTPUT=true
 CLEAN_LOGS=true
 CLEAN_HF_CACHE=true
 
-# If specific --no-* flags are set, only disable those individually.
-# If ALL --no-* flags are set, assume the user wants nothing — but that's unusual.
-# Default behavior (--no-* not specified): clean everything.
-
-# We need at least one thing to clean
+# If ALL --no-* flags are set, still do Docker teardown but skip resource dirs
 if $NO_VOLUMENS && $NO_BUILD && $NO_OUTPUT && $NO_LOGS && $NO_HF_CACHE; then
-  # When ALL flags are explicitly set to skip, do a basic docker-only clean
-  CLEAN_VOLUMENS=true;  CLEAN_BUILD=false; CLEAN_OUTPUT=false; CLEAN_LOGS=false
+  CLEAN_BUILD=false
+  CLEAN_OUTPUT=false
+  CLEAN_LOGS=false
   echo "Note: all --no-* flags set; will still tear down Docker resources."
 else
-  CLEAN_VOLUMENS=$([[ "$NO_VOLUMENS" == false && "$NO_HF_CACHE" == false ]] && echo true || echo false)
-  CLEAN_BUILD=$([[ "$NO_BUILD" == false ]] && echo true || echo false)
-  CLEAN_OUTPUT=$([[ "$NO_OUTPUT" == false ]] && echo true || echo false)
-  CLEAN_LOGS=$([[ "$NO_LOGS" == false ]] && echo true || echo false)
-  # NO_HF_CACHE only matters if NO_VOLUMENS is also not set; handled above
+  $NO_VOLUMENS && CLEAN_VOLUMENS=false
+  $NO_BUILD     && CLEAN_BUILD=false
+  $NO_OUTPUT    && CLEAN_OUTPUT=false
+  $NO_LOGS      && CLEAN_LOGS=false
+  $NO_HF_CACHE  && CLEAN_HF_CACHE=false
 fi
 
 header() {
@@ -92,15 +89,13 @@ header "Docker cleanup"
 
 if [ "$DRY_RUN" = true ]; then
   echo "[DRY RUN] Would: stop and remove containers"
-  if $CLEAN_VOLUMENS; then
-    echo "[DRY RUN] Would: remove volumes (--remove-orphans)"
-  fi
+  $CLEAN_VOLUMENS && echo "[DRY RUN] Would: remove volumes (--remove-orphans)"
 else
   echo "  Stopping and removing containers ..."
-  "$DOCKER_COMPOSE" down --remove-orphans 2>/dev/null || true
+  dc down --remove-orphans 2>/dev/null || true
   if $CLEAN_VOLUMENS; then
     echo "  Removing volumes ..."
-    "$DOCKER_COMPOSE" down -v --remove-orphans 2>/dev/null || true
+    dc down -v --remove-orphans 2>/dev/null || true
   fi
 fi
 
@@ -114,8 +109,6 @@ if $CLEAN_BUILD; then
   else
     echo "  No frontend build directory found (checked build/ and dist/)"
   fi
-  # Also clean node_modules if a clean rebuild is desired — but that's aggressive
-  # run_or_preview "Remove frontend/node_modules/" "rm -rf frontend/node_modules"
 fi
 
 # 3. Clean output directory
@@ -139,7 +132,7 @@ if $CLEAN_LOGS; then
 fi
 
 # 5. Clean HuggingFace cache volume
-if $CLEAN_HF_CACHE && $CLEAN_VOLUMENS; then
+if $CLEAN_HF_CACHE; then
   header "HuggingFace cache volume"
   VOLUME_EXISTS=$(docker volume ls -q --filter name=comic-generator_hf-cache 2>/dev/null || true)
   if [ -n "$VOLUME_EXISTS" ]; then
@@ -148,20 +141,9 @@ if $CLEAN_HF_CACHE && $CLEAN_VOLUMENS; then
   else
     echo "  HuggingFace cache volume not found (may have been removed with docker compose down -v)"
   fi
-elif $CLEAN_HF_CACHE && ! $CLEAN_VOLUMENS; then
-  header "HuggingFace cache (standalone)"
-  VOLUME_EXISTS=$(docker volume ls -q --filter name=comic-generator_hf-cache 2>/dev/null || true)
-  if [ -n "$VOLUME_EXISTS" ]; then
-    run_or_preview "Remove Docker volume comic-generator_hf-cache" \
-      "docker volume rm comic-generator_hf-cache"
-  else
-    echo "  HuggingFace cache volume not found"
-  fi
 fi
 
 # Summary
 header "Done"
-if [ "$DRY_RUN" = true ]; then
-  echo "This was a dry run. Re-run without --dry-run to actually clean."
-fi
+[ "$DRY_RUN" = true ] && echo "This was a dry run. Re-run without --dry-run to actually clean."
 echo "All clean!"

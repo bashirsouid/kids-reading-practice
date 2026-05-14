@@ -24,11 +24,15 @@ export function PanelBreakdownPage() {
   const [isGeneratingBreakdown, setIsGeneratingBreakdown] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const didRequestBreakdown = useRef(false);
+  // Track whether the user has made edits to avoid overwriting them
+  const didSyncPanelsFromGlobal = useRef(false);
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-  // Sync panels from wizard state when story updates
+  // Sync panels from wizard state only once on initial load, NOT on subsequent story updates
+  // to avoid overwriting user edits with stale server data.
   useEffect(() => {
-    if (state.story?.panels && state.story.panels.length > 0) {
+    if (!didSyncPanelsFromGlobal.current && state.story?.panels && state.story.panels.length > 0) {
+      didSyncPanelsFromGlobal.current = true;
       setPanels(state.story.panels);
     }
   }, [state.story]);
@@ -74,9 +78,9 @@ export function PanelBreakdownPage() {
     setPanels(newPanels);
   };
 
-  const handleNext = async () => {
+const handleNext = async () => {
     if (!state.jobId) return;
-    
+
     // Save panel edits to the backend before proceeding
     try {
       const panelsToUpdate = panels.map((p, idx) => ({
@@ -89,12 +93,23 @@ export function PanelBreakdownPage() {
         is_placeholder: p.is_placeholder,
       }));
       await updatePanels(state.jobId, panelsToUpdate);
+
+      // Update global state so edits persist across navigation
+      if (state.story) {
+        dispatch({
+          type: 'SET_STORY',
+          payload: {
+            ...state.story,
+            panels: panelsToUpdate,
+          },
+        });
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to save panel edits';
       setError(errorMessage);
       return;
     }
-    
+
     // Proceed to panel image generation
     await proceedToNextStage(state.jobId);
     navigate(projectPath('panelImages'));
@@ -141,18 +156,18 @@ export function PanelBreakdownPage() {
               <div key={idx} className={`card mb-3 ${isPlaceholder ? 'border-dashed border-accent' : ''}`}>
                 <div className="font-semibold text-gold mb-2">
                   # {idx + 1} Panel {isPlaceholder && <span className="text-accent text-xs">(PLACEHOLDER - Needs Text)</span>}
-                </div>
-                <div className="input-area mb-2">
-                  <label className="text-xs">Characters</label>
-                  <input
-                    type="text"
-                    value={panel.characters || ''}
-                    onChange={(e) => handlePanelUpdate(idx, 'characters', e.target.value)}
-                    placeholder="Character names..."
-                    className="text-sm"
-                  />
-                </div>
-                <div className="input-area mb-2">
+</div>
+                 <div className="input-area mb-2">
+                   <label className="text-xs">Characters</label>
+                   <input
+                     type="text"
+                     value={Array.isArray(panel.characters) ? panel.characters.join(', ') : panel.characters || ''}
+                     onChange={(e) => handlePanelUpdate(idx, 'characters', e.target.value)}
+                     placeholder="Character names..."
+                     className="text-sm"
+                   />
+                 </div>
+                 <div className="input-area mb-2">
                   <label className="text-xs">Scene Description</label>
                   <textarea
                     rows={2}
