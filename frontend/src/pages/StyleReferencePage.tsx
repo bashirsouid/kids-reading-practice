@@ -58,18 +58,13 @@ export function StyleReferencePage() {
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-  // Sync local form state when wizard state catches up (after WebSocket
-  // story updates land).
-  useEffect(() => {
-    if (state.story?.art_style && state.story.art_style !== artStyle) {
-      setArtStyle(state.story.art_style);
-    }
-    if (state.story?.story_setting !== undefined
-        && state.story.story_setting !== storySetting) {
-      setStorySetting(state.story.story_setting);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.story?.art_style, state.story?.story_setting]);
+  // NOTE: we used to sync local form state from `state.story` here. That was
+  // an attractive nuisance — any WebSocket broadcast (every panel finish,
+  // every stage change) overwrites parts of state.story, and if a field was
+  // missing from the broadcast payload it'd wipe what the user just typed.
+  // Now the textbox is purely a controlled component: initialized from
+  // state.story on mount, owned by local state thereafter. The blur handler
+  // writes back to the server.
 
   // Build a preview that mirrors the backend's _generate_reference_prompt
   // exactly — so what the user sees is what the model is given.

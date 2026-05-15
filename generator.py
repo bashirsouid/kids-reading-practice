@@ -208,7 +208,10 @@ class TextGenerator:
         for attempt in range(max_retries):
             raw = ""
             try:
-                raw = self.generate(prompt, max_tokens=900)
+                # 1200 tokens gives the CHARACTER_BIBLE paragraph headroom
+                # even with 3-4 detailed characters; 900 was sometimes
+                # clipping mid-character.
+                raw = self.generate(prompt, max_tokens=1200)
                 result = _parse_reference_profile_text(raw, synopsis, title)
                 logger.info("Reference profile generation succeeded on attempt " + str(attempt + 1) + ".")
                 return result
@@ -291,17 +294,13 @@ class TextGenerator:
 
 
 def _build_story_prompt(synopsis: str) -> str:
-    """Build the structured plain-text prompt for a comic story.
+    """Build the labeled plain-text prompt for a comic story.
 
-    Two important changes vs the earlier prompt:
-      1. Asks for a STORY_SETTING field — a single sentence that anchors the
-         world (location, time of day, weather, mood, lighting). This is
-         injected into every panel prompt so the world stays consistent.
-      2. Replaces the flowing CHARACTER_BIBLE paragraph with a structured
-         per-character block. The old format was fragile to parse and the
-         regex extractor in _auto_detect_characters made character details
-         drift between runs. The structured form parses cleanly with one
-         pass and is the same length.
+    The only new field vs the original prompt is STORY_SETTING — a single
+    sentence world anchor injected into every panel prompt. CHARACTER_BIBLE
+    is kept as a flowing paragraph: small LLMs (Qwen2.5-3B) follow this
+    format reliably, whereas earlier attempts to demand nested per-character
+    blocks led to empty parses and blank reference images.
     """
     return (
         "Write a 6-panel children's comic book story based on this synopsis:\n"
@@ -310,19 +309,18 @@ def _build_story_prompt(synopsis: str) -> str:
         "Do not output markdown. Do not add any commentary before or after.\n\n"
         "TITLE: <story title on one line>\n\n"
         "ART_STYLE: <one short sentence describing the visual style, e.g. \"modern 3D animation, cinematic lighting, high detail\">\n\n"
-        "STORY_SETTING: <one short sentence that describes the shared visual world: location, time of day, weather, lighting, and mood. Every panel happens inside this world. e.g. \"a misty pine forest at twilight, soft moonlight filtering through tall trees, glowing fireflies\">\n\n"
-        "CHARACTERS:\n"
-        "- NAME: <character name>\n"
-        "  SPECIES: <human, cat, robot, dragon, etc.>\n"
-        "  APPEARANCE: <body type, height, age, exact hair color and style, exact eye color, exact skin or fur tone>\n"
-        "  OUTFIT: <specific clothing with exact colors and garment types, e.g. \"red hoodie, blue jeans, white sneakers\">\n"
-        "  DISTINGUISHING: <accessories, markings, scars, glasses, posture, anything that makes them visually unique>\n"
-        "- NAME: <next character>\n"
-        "  SPECIES: ...\n"
-        "  APPEARANCE: ...\n"
-        "  OUTFIT: ...\n"
-        "  DISTINGUISHING: ...\n"
-        "(Include every character that appears in ANY panel, even minor ones introduced later. Always specify EXACT colors. Never say \"colorful clothes\" or \"nice hair\".)\n\n"
+        "STORY_SETTING: <one short sentence describing the shared visual world: location, time of day, weather, lighting, and mood. Every panel happens inside this world. e.g. \"a misty pine forest at twilight, soft moonlight filtering through tall trees, glowing fireflies\">\n\n"
+        "CHARACTER_BIBLE: <one single paragraph describing EVERY character that appears in ANY panel of this story, including characters introduced in later panels. For EACH character provide ALL of the following details in a single flowing paragraph:\n"
+        "- Full name\n"
+        "- Species/type (human, cat, robot, dragon, etc.)\n"
+        "- Body shape and size (tall, short, chubby, slim, tiny, large, etc.)\n"
+        "- Exact HAIR COLOR and HAIR STYLE (e.g., \"long curly red hair\", \"short black buzzcut\", \"blue braided ponytail\")\n"
+        "- Exact EYE COLOR (e.g., \"big green eyes\", \"dark brown eyes\", \"golden amber eyes\")\n"
+        "- Exact SKIN TONE (e.g., \"fair pale skin\", \"medium brown skin\", \"dark brown skin\", \"warm olive skin\")\n"
+        "- Exact CLOTHING with specific COLORS and garment types (e.g., \"red hoodie with blue jeans and white sneakers\", \"purple wizard robe with gold stars and brown boots\")\n"
+        "- Any DISTINCTIVE MARKINGS or ACCESSORIES (e.g., \"a scar on left cheek\", \"round glasses\", \"a silver necklace\", \"freckles\", \"cat whiskers\", \"a magic wand\")\n"
+        "- Overall personality vibe or posture if relevant (e.g., \"always smiling\", \"shy and hunched\", \"confident stance with arms crossed\")\n\n"
+        "IMPORTANT: The CHARACTER_BIBLE must be a SINGLE paragraph (no bullet points, no line breaks within it) so it can be parsed reliably. Separate each character's description with a period and space. Make descriptions vivid and specific - NEVER say \"colorful clothes\" or \"nice hair\" without specifying exact colors and styles.>\n\n"
         "PANEL 1\n"
         "CHARACTERS: <comma-separated list of character names appearing in this panel; use the same name spellings across all panels>\n"
         "SCENE: <vivid literal visual description of the panel. Say exactly what each character is DOING (use clear action verbs), where they are positioned, and what is visible in the foreground and background. Write it as an image-generation prompt — no narration voice, no \"meanwhile\", just what the camera sees.>\n"
@@ -340,8 +338,9 @@ def _build_story_prompt(synopsis: str) -> str:
 def _build_reference_profile_prompt(synopsis: str, title: str) -> str:
     """Build metadata only for Step 3 reference generation (no panels yet).
 
-    Structured per-character format + STORY_SETTING anchor, matching the
-    full story prompt.
+    Adds STORY_SETTING to the original flowing CHARACTER_BIBLE format. The
+    flowing paragraph is what Qwen2.5-3B reliably produces; the parser
+    extracts characters from it via _auto_detect_characters.
     """
     return (
         "Create character reference metadata for this children's comic book.\n\n"
@@ -352,15 +351,17 @@ def _build_reference_profile_prompt(synopsis: str, title: str) -> str:
         "TITLE: <story title on one line>\n\n"
         "ART_STYLE: <one short sentence describing the visual style, e.g. \"modern 3D animation, cinematic lighting, high detail\">\n\n"
         "STORY_SETTING: <one short sentence describing the shared visual world: location, time of day, weather, lighting, and mood>\n\n"
-        "CHARACTERS:\n"
-        "- NAME: <character name>\n"
-        "  SPECIES: <human, cat, robot, dragon, etc.>\n"
-        "  APPEARANCE: <body type, height, age, exact hair color and style, exact eye color, exact skin or fur tone>\n"
-        "  OUTFIT: <specific clothing with exact colors and garment types>\n"
-        "  DISTINGUISHING: <accessories, markings, posture, anything visually unique>\n"
-        "- NAME: <next character>\n"
-        "  ...\n"
-        "(Include every important character likely to appear in this story. Always specify EXACT colors. Never say \"colorful clothes\" or \"nice hair\".)"
+        "CHARACTER_BIBLE: <one single paragraph describing EVERY important character likely to appear in this story. For EACH character provide ALL of the following details in a single flowing paragraph:\n"
+        "- Full name\n"
+        "- Species/type (human, cat, robot, dragon, etc.)\n"
+        "- Body shape and size (tall, short, chubby, slim, tiny, large, etc.)\n"
+        "- Exact HAIR COLOR and HAIR STYLE (e.g., \"long curly red hair\", \"short black buzzcut\", \"blue braided ponytail\")\n"
+        "- Exact EYE COLOR (e.g., \"big green eyes\", \"dark brown eyes\", \"golden amber eyes\")\n"
+        "- Exact SKIN TONE (e.g., \"fair pale skin\", \"medium brown skin\", \"dark brown skin\", \"warm olive skin\")\n"
+        "- Exact CLOTHING with specific COLORS and garment types (e.g., \"red hoodie with blue jeans and white sneakers\", \"purple wizard robe with gold stars and brown boots\")\n"
+        "- Any DISTINCTIVE MARKINGS or ACCESSORIES (e.g., \"a scar on left cheek\", \"round glasses\", \"a silver necklace\", \"freckles\", \"cat whiskers\", \"a magic wand\")\n"
+        "- Overall personality vibe or posture if relevant\n\n"
+        "IMPORTANT: The CHARACTER_BIBLE must be a SINGLE paragraph (no bullet points, no line breaks within it). Separate each character's description with a period and space. Make descriptions vivid and specific - NEVER say \"colorful clothes\" or \"nice hair\" without specifying exact colors and styles. This is critical for generating a consistent reference image.>"
     )
 
 
@@ -374,99 +375,11 @@ _PANEL_FIELD_RE = re.compile(
     r"\b(CHARACTERS|SCENE|CAPTION)\s*:\s*(.*?)(?=\b(?:CHARACTERS|SCENE|CAPTION)\s*:|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
-# Headers that come before the panel section. STORY_SETTING is the new
-# world-anchor field; CHARACTER_BIBLE is kept for backward compat with old
-# saved jobs that still have the flowing-paragraph format.
 _HEADER_FIELD_RE = re.compile(
     r"\b(TITLE|ART_STYLE|STORY_SETTING|CHARACTER_BIBLE)\s*:\s*(.*?)"
-    r"(?=\b(?:TITLE|ART_STYLE|STORY_SETTING|CHARACTER_BIBLE|CHARACTERS)\s*:|\bPANEL\s+\d+\b|\Z)",
+    r"(?=\b(?:TITLE|ART_STYLE|STORY_SETTING|CHARACTER_BIBLE)\s*:|\bPANEL\s+\d+\b|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
-
-
-def _parse_structured_characters(text: str) -> list[Character]:
-    """Parse the new structured CHARACTERS block into Character objects.
-
-    Looks for a CHARACTERS: section containing one or more entries shaped
-    like:
-
-        - NAME: <name>
-          SPECIES: <species>
-          APPEARANCE: <visual>
-          OUTFIT: <clothing+colors>
-          DISTINGUISHING: <accessories/markings>
-
-    Returns [] if the section is missing or malformed — callers should
-    fall back to the legacy paragraph parser.
-    """
-    section_re = re.compile(
-        r"CHARACTERS\s*:\s*(.*?)(?=\n\s*PANEL\s+\d+\b|\Z)",
-        re.IGNORECASE | re.DOTALL,
-    )
-    m = section_re.search(text)
-    if not m:
-        return []
-    section = m.group(1)
-
-    # Split on each "- NAME:" boundary (tolerate missing dash).
-    blocks = re.split(
-        r"(?:^|\n)\s*-?\s*NAME\s*:\s*",
-        section,
-        flags=re.IGNORECASE,
-    )
-    if len(blocks) < 2:
-        return []
-
-    field_names = ("SPECIES", "APPEARANCE", "OUTFIT", "DISTINGUISHING")
-    characters: list[Character] = []
-    for block in blocks[1:]:
-        # First line of the block is the character name.
-        name_match = re.match(r"([^\n]+)", block)
-        if not name_match:
-            continue
-        name = name_match.group(1).strip().strip("\"'").strip("*").strip()
-        # Reject obvious junk: empty, runaway, or label-like tokens.
-        if not name or len(name) > 60 or name.upper() in field_names:
-            continue
-
-        fields: dict[str, str] = {}
-        for fname in field_names:
-            field_re = re.compile(
-                r"\b" + fname + r"\s*:\s*(.+?)(?=\n\s*(?:NAME|"
-                + "|".join(field_names) + r")\s*:|\Z)",
-                re.IGNORECASE | re.DOTALL,
-            )
-            fm = field_re.search(block)
-            if fm:
-                v = fm.group(1).strip().strip("*").strip()
-                v = re.sub(r"\s+", " ", v)
-                fields[fname] = v
-
-        desc_parts: list[str] = []
-        if "SPECIES" in fields:
-            desc_parts.append("a " + fields["SPECIES"])
-        if "APPEARANCE" in fields:
-            desc_parts.append(fields["APPEARANCE"])
-        if "OUTFIT" in fields:
-            desc_parts.append("wearing " + fields["OUTFIT"])
-        if "DISTINGUISHING" in fields:
-            desc_parts.append(fields["DISTINGUISHING"])
-
-        if not desc_parts:
-            # Block had a NAME but no usable fields. Skip rather than emit
-            # an empty Character.
-            continue
-
-        characters.append(Character(name=name, description=", ".join(desc_parts)))
-
-    return characters
-
-
-def _synthesize_character_bible(characters: list[Character]) -> str:
-    """Build a flat paragraph from structured characters for display/storage."""
-    if not characters:
-        return ""
-    return ". ".join(c.name + ": " + (c.description or "").strip() for c in characters) + "."
 
 
 def _auto_detect_characters(character_bible: str) -> list[Character]:
@@ -585,15 +498,8 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
     panels = panels[:6]
     panels.sort(key=lambda p: p.index)
 
-    # Prefer the new structured CHARACTERS section. Fall back to the legacy
-    # flowing CHARACTER_BIBLE paragraph if the LLM ignored the format (or
-    # we're loading from an older saved job).
-    characters = _parse_structured_characters(text)
-    if characters:
-        character_bible = _synthesize_character_bible(characters)
-    else:
-        character_bible = headers.get("CHARACTER_BIBLE", "")
-        characters = _auto_detect_characters(character_bible)
+    character_bible = headers.get("CHARACTER_BIBLE", "")
+    characters = _auto_detect_characters(character_bible)
 
     return ComicStory(
         title=headers.get("TITLE", "Untitled").strip() or "Untitled",
@@ -619,18 +525,16 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
     for m in _HEADER_FIELD_RE.finditer(text):
         headers[m.group(1).upper()] = m.group(2).strip()
 
-    # New format: structured CHARACTERS section. Legacy fallback: flowing
-    # CHARACTER_BIBLE paragraph.
-    characters = _parse_structured_characters(text)
-    if characters:
-        character_bible = _synthesize_character_bible(characters)
-    else:
-        character_bible = headers.get("CHARACTER_BIBLE", "").strip()
-        if not character_bible:
-            raise ValueError("Missing CHARACTERS section and CHARACTER_BIBLE")
-        characters = _auto_detect_characters(character_bible)
-        if not characters:
-            raise ValueError("Could not extract any characters from the LLM output")
+    character_bible = headers.get("CHARACTER_BIBLE", "").strip()
+    if not character_bible:
+        # The retry loop in generate_reference_profile will try again with a
+        # fresh sample. After max_retries it bubbles up — better to fail
+        # loudly here than to silently feed FLUX an empty character list and
+        # produce a blank reference image.
+        raise ValueError("LLM did not produce a CHARACTER_BIBLE")
+    characters = _auto_detect_characters(character_bible)
+    if not characters:
+        raise ValueError("Could not extract any characters from CHARACTER_BIBLE")
 
     return ComicStory(
         title=headers.get("TITLE", fallback_title).strip() or fallback_title,
@@ -1222,6 +1126,17 @@ def generate_master_reference(
     seed: Optional[int] = None,
 ) -> Image.Image:
     """Generate the master character reference image via FLUX text2img."""
+    # Fail loudly rather than feed FLUX an empty character list. The old
+    # silent-fallthrough behavior produced a blank off-white image (FLUX
+    # rendered the "plain studio background" with no characters to depict).
+    if not story.characters and not (story.character_bible or "").strip():
+        raise ValueError(
+            "Cannot generate master reference: story has no characters. "
+            "The LLM did not produce a CHARACTER_BIBLE. Re-run synopsis "
+            "confirmation to retry the character profile, or edit the "
+            "character bible directly."
+        )
+
     gen_w, gen_h = _panel_gen_dims(0)
 
     prompt = _generate_reference_prompt(story)

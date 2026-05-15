@@ -115,6 +115,9 @@ async def broadcast_job_update(job):
             "title": job.story.title,
             "synopsis": job.story.synopsis,
             "art_style": job.story.art_style,
+            # New shared world-anchor; getattr keeps us safe loading older
+            # jobs that pre-date the field.
+            "story_setting": getattr(job.story, "story_setting", ""),
             "character_bible": job.story.character_bible,
             "characters": [{"name": c.name, "description": c.description} for c in job.story.characters],
             "panels": [
