@@ -18,6 +18,7 @@ import {
   generateMasterReference,
   updateArtStyle,
   updateStorySetting,
+  regenerateStoryProfile,
 } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
@@ -182,6 +183,37 @@ export function StyleReferencePage() {
     }
   };
 
+  const [isRegeneratingProfile, setIsRegeneratingProfile] = useState(false);
+
+  // Recovery path for projects where an earlier run produced an empty/garbage
+  // character bible (the old parser was broken on compound words). This
+  // re-runs the LLM profile pass without touching title/synopsis/panels.
+  const handleRegenerateProfile = async () => {
+    if (!state.jobId || !state.story) return;
+    setIsRegeneratingProfile(true);
+    setError(null);
+    try {
+      const result = await regenerateStoryProfile(state.jobId);
+      // Push the new profile into wizard state so the preview reflects it.
+      dispatch({
+        type: 'SET_STORY',
+        payload: {
+          ...state.story,
+          art_style: result.art_style || state.story.art_style,
+          story_setting: result.story_setting || '',
+          character_bible: result.character_bible || '',
+          characters: result.characters || [],
+        },
+      });
+      if (result.art_style) setArtStyle(result.art_style);
+      if (result.story_setting !== undefined) setStorySetting(result.story_setting || '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to regenerate story profile');
+    } finally {
+      setIsRegeneratingProfile(false);
+    }
+  };
+
   const handleGenerateReference = async () => {
     if (!state.jobId) return;
     setIsGeneratingRef(true);
@@ -237,8 +269,29 @@ export function StyleReferencePage() {
   return (
     <div className="main-layout">
       <div className="form-section">
-        <div className="text-xs text-text-dim mb-3">Step 3: Style & Reference</div>
-        <h2 className="text-xl text-gold mb-4">🎨 Style & Reference Image</h2>
+        <div className="flex items-start justify-between mb-3">
+          <div>
+            <div className="text-xs text-text-dim mb-1">Step 3: Style & Reference</div>
+            <h2 className="text-xl text-gold">🎨 Style & Reference Image</h2>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleRegenerateProfile}
+            disabled={isRegeneratingProfile}
+            title="Re-run the LLM character/style/world pass. Useful if the reference image came out blank — usually means the character bible parse failed in an earlier run."
+          >
+            {isRegeneratingProfile ? 'Regenerating…' : '🔄 Regenerate Story Profile'}
+          </Button>
+        </div>
+
+        {state.story?.characters && state.story.characters.length === 0 && (
+          <div className="bg-amber-900/40 border border-amber-500/40 text-amber-200 p-3 rounded-md mb-3 text-xs">
+            <strong>No characters detected.</strong> The character bible
+            didn't parse — the reference image will be blank. Click{' '}
+            <em>Regenerate Story Profile</em> above to retry the LLM pass.
+          </div>
+        )}
 
         <div className="mb-4">
           <div className="input-area">

@@ -122,8 +122,23 @@ const handleNext = async () => {
   return (
     <div className="flex justify-center">
       <div className="form-section w-full max-w-8xl mt-10">
-        <div className="text-xs text-text-dim mb-3">Step 4: Panel Breakdown</div>
-        <h2 className="text-xl text-gold mb-4">📋 Panel Breakdown</h2>
+        <div className="flex items-start justify-between mb-3">
+          <div>
+            <div className="text-xs text-text-dim mb-1">Step 4: Panel Breakdown</div>
+            <h2 className="text-xl text-gold">📋 Panel Breakdown</h2>
+          </div>
+          {panels.length > 0 && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleRegenerate}
+              disabled={isGeneratingBreakdown}
+              title="Re-run the LLM to produce a fresh set of 6 panels. Your character bible, art style, and reference image are preserved."
+            >
+              {isGeneratingBreakdown ? 'Regenerating…' : '🔄 Regenerate Panels'}
+            </Button>
+          )}
+        </div>
 
         {error && (
           <ErrorMessage message={error} onDismiss={() => setError(null)} />

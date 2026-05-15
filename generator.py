@@ -380,7 +380,8 @@ _HEADER_FIELD_RE = re.compile(
 
 _GARBAGE_NAMES = {
     'title', 'art_style', 'story_setting', 'character_bible',
-    'characters', 'character',
+    'characters', 'character', 'caption',
+    'scene', 'setting', 'background', 'foreground', 'panel', 'landscape',
     'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
     'where', 'how', 'why', 'what', 'which', 'who', 'whom', 'whose',
     'there', 'here', 'this', 'that', 'these', 'those',
@@ -388,36 +389,51 @@ _GARBAGE_NAMES = {
     'they', 'them', 'their', 'theirs',
     'we', 'us', 'our', 'ours', 'you', 'your', 'yours',
     'i', 'me', 'my', 'mine',
-    'sure', 'okay', 'ok', 'here', "here's", 'note', 'notes',
-    'scene', 'setting', 'background', 'foreground', 'panel', 'landscape',
+    'sure', 'okay', 'ok', "here's", 'note', 'notes',
     'one', 'two', 'three', 'four', 'five', 'six',
-    'the first', 'the second', 'the third', 'the fourth',
-    'the fifth', 'the sixth', 'the seventh',
 }
+
+# A character name must look like a proper noun: 1-3 capitalized words made
+# of letters or apostrophes. This rejects "Here are the characters" and
+# other prose phrases that happen to contain a colon.
+_NAME_VALID_RE = re.compile(r"^[A-Z][a-zA-Z']{1,29}(?:\s+[A-Z][a-zA-Z']{1,29}){0,2}$")
+_PROPER_NOUN_RE = r"[A-Z][a-zA-Z']{1,29}(?:\s+[A-Z][a-zA-Z']{1,29}){0,2}"
+
+
+def _is_valid_character_name(name: str) -> bool:
+    """Reject prose, field labels, and other non-name strings."""
+    if not name or len(name) > 60:
+        return False
+    if not _NAME_VALID_RE.match(name):
+        return False
+    if name.lower() in _GARBAGE_NAMES:
+        return False
+    return True
 
 
 def _auto_detect_characters(character_bible: str) -> list[Character]:
     """Extract characters from a CHARACTER_BIBLE produced by the LLM.
 
-    Supports two LLM output styles, in order of preference:
+    Runs three independent parse passes and merges results (deduped by
+    name). This handles the wide variety of shapes Qwen-3B actually
+    produces:
 
-    1. **Bulleted per-line list** (what the prompt asks for):
+    1. **Bulleted per-line** — what the prompt requests:
+         - Bramble: small fluffy brown rabbit
+         - Glow: palm-sized luminous moth
 
-           - Bramble: small fluffy brown rabbit, long droopy ears, ...
-           - Glow: palm-sized luminous moth, pale-blue wings, ...
+    2. **Inline "Name: desc"** patterns anywhere — catches the case
+       where the LLM puts multiple characters on one line:
+         "Bramble: small brown rabbit. Glow: palm-sized moth."
 
-       Splits on the FIRST colon per line — never on a dash. The earlier
-       parser allowed `-` as a name/desc separator, so compound words in
-       descriptions (palm-sized, pale-blue, dark-brown) became name
-       boundaries and produced garbage character names.
+    3. **Flowing paragraph "Name is/was ..."** — catches LLM deviation
+       and legacy saved jobs:
+         "Bramble is a small brown rabbit. Glow is a palm-sized moth."
 
-    2. **Flowing paragraph fallback** for older saved jobs or LLM
-       deviations:
-
-           "Bramble is a small brown rabbit. Glow is a moth."
-
-       The paragraph is split into sentences and each is matched against
-       a "Name is/was ..." pattern.
+    The first-colon-only split (never on `-`) was the critical fix:
+    earlier the parser treated dashes in descriptions ("palm-sized",
+    "pale-blue") as name boundaries, producing garbage names and
+    feeding FLUX a blank-rendering prompt.
     """
     if not character_bible:
         return []
@@ -425,52 +441,45 @@ def _auto_detect_characters(character_bible: str) -> list[Character]:
     chars: list[Character] = []
     seen: set[str] = set()
 
-    # Format 1: bulleted per-line list.
+    def add(name: str, desc: str) -> None:
+        if not _is_valid_character_name(name):
+            return
+        if not desc or len(desc) < 5:
+            return
+        if name.lower() in seen:
+            return
+        seen.add(name.lower())
+        chars.append(Character(name=name, description=desc))
+
+    # Pass 1: per-line bulleted/colon-prefixed entries.
     for raw_line in character_bible.split('\n'):
-        # Strip leading bullet markers (-, *, 1., 1), etc.) plus whitespace.
-        line = re.sub(r'^[\-\*\d\.\)\s]+', '', raw_line).strip()
+        line = re.sub(r'^[\-\*•\d\.\)\s]+', '', raw_line).strip()
         if ':' not in line:
             continue
         name, _, desc = line.partition(':')
-        # Strip markdown emphasis around the name (e.g. **Bramble**).
         name = re.sub(r'[\*\_`]', '', name).strip()
-        desc = desc.strip()
-        if not name or not desc:
-            continue
-        if len(name) > 60 or len(desc) < 5:
-            continue
-        if name.lower() in _GARBAGE_NAMES:
-            continue
-        if name.lower() in seen:
-            continue
-        seen.add(name.lower())
-        chars.append(Character(name=name, description=desc))
+        add(name, desc.strip())
 
-    if chars:
-        return chars
-
-    # Format 2: flowing paragraph. Split on sentence boundaries and try
-    # to match each sentence against "Name is/was ...".
-    SENTENCE_NAME_RE = re.compile(
-        r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:is|was)\s+(?:a|an|the)?\s*(.+)$'
-    )
-    for sentence in re.split(r'[.!?\n]+', character_bible):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        m = SENTENCE_NAME_RE.match(sentence)
-        if not m:
-            continue
+    # Pass 2: every "ProperNoun: ..." occurrence anywhere in the text.
+    # Handles inline lists where multiple characters share a single line.
+    matches = list(re.finditer(
+        rf"(?:^|[\s\n\-•])\s*({_PROPER_NOUN_RE})\s*:\s*",
+        character_bible,
+    ))
+    for i, m in enumerate(matches):
         name = m.group(1).strip()
-        desc = m.group(2).strip()
-        if name.lower() in _GARBAGE_NAMES:
-            continue
-        if name.lower() in seen:
-            continue
-        if len(name) < 2 or len(desc) < 5:
-            continue
-        seen.add(name.lower())
-        chars.append(Character(name=name, description=desc))
+        ds = m.end()
+        de = matches[i + 1].start() if i + 1 < len(matches) else len(character_bible)
+        desc = character_bible[ds:de].strip(" .,;-\n")
+        add(name, desc)
+
+    # Pass 3: flowing "Name is/was ..." sentences.
+    SENTENCE_RE = re.compile(
+        rf"\b({_PROPER_NOUN_RE})\s+(?:is|was)\s+(?:a|an|the)?\s*"
+        rf"([^.!?]+?)(?=\s*(?:{_PROPER_NOUN_RE}\s+(?:is|was)|[.!?]|$))"
+    )
+    for m in SENTENCE_RE.finditer(character_bible):
+        add(m.group(1).strip(), m.group(2).strip())
 
     return chars
 

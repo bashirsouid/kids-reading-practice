@@ -84,6 +84,25 @@ export async function updateStorySetting(jobId: string, storySetting: string): P
   return handleResponse(response);
 }
 
+/**
+ * Re-run the LLM character/style/world profile pass. Useful for recovering
+ * projects where earlier runs failed to parse characters and left an empty
+ * cast (which makes the reference image render blank). Preserves the user's
+ * title/synopsis/panels/master reference; only the AI profile fields are
+ * replaced.
+ */
+export async function regenerateStoryProfile(jobId: string): Promise<{
+  characters: Character[];
+  story_setting?: string;
+  art_style?: string;
+  character_bible?: string;
+}> {
+  const response = await fetch(`${API_BASE}/regenerate-story-profile/${jobId}`, {
+    method: 'POST',
+  });
+  return handleResponse(response);
+}
+
 export async function updateCharacters(jobId: string, characters: Character[]): Promise<void> {
   const response = await fetch(`${API_BASE}/update-characters`, {
     method: 'POST',

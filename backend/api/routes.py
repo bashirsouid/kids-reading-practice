@@ -452,6 +452,61 @@ async def api_generate_reference(job_id: str):
     return {"status": "ok", "message": "Reference generation started"}
 
 
+@router.post("/api/regenerate-story-profile/{job_id}")
+async def api_regenerate_story_profile(job_id: str):
+    """Re-run the LLM character/style/world profile pass.
+
+    Useful when an earlier run left the project with no parseable
+    characters (the old parser was broken on compound words like
+    ``palm-sized``, which produced garbage character names and made
+    the reference image come out blank). Re-running with the current
+    parser usually rescues the project without forcing a full restart.
+
+    Preserves the user's edited title / synopsis / panels / master
+    reference if they exist — only the AI-generated profile fields
+    (art_style, story_setting, character_bible, characters) are
+    replaced.
+    """
+    if not global_state.models_loaded:
+        raise HTTPException(status_code=503, detail="Models still loading")
+
+    job = global_state.jobs.get(job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    loop = asyncio.get_event_loop()
+    synopsis = job.story.synopsis or job.input_text
+    title = job.story.title or "Untitled"
+
+    new_profile = await loop.run_in_executor(
+        None,
+        lambda: global_state.text_gen.generate_reference_profile(synopsis, title),
+    )
+
+    # Surgically replace just the AI-generated profile fields; leave
+    # user-owned and downstream-generated state alone.
+    job.story.art_style = new_profile.art_style
+    job.story.story_setting = new_profile.story_setting
+    job.story.character_bible = new_profile.character_bible
+    job.story.characters = new_profile.characters
+
+    logger.info(
+        "Regenerated story profile for job " + job_id + ": "
+        + str(len(new_profile.characters)) + " character(s) ("
+        + ", ".join(c.name for c in new_profile.characters) + ")"
+    )
+
+    save_jobs()
+    await broadcast_job_update(job)
+    return {
+        "status": "ok",
+        "characters": [{"name": c.name, "description": c.description} for c in new_profile.characters],
+        "story_setting": new_profile.story_setting,
+        "art_style": new_profile.art_style,
+        "character_bible": new_profile.character_bible,
+    }
+
+
 async def _generate_reference_task(job):
     """Background task to generate master reference image."""
     loop = asyncio.get_event_loop()
