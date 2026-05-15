@@ -1,7 +1,7 @@
 """
-generator.py — Core AI generation logic for Comic Book Generator.
+generator.py - Core AI generation logic for Comic Book Generator.
 
-Handles text generation (story → JSON), image generation (FLUX.1-dev),
+Handles text generation (story -> JSON), image generation (FLUX.1-dev),
 and comic page rendering (PIL-based 8.5x11" layout).
 """
 
@@ -20,10 +20,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger("comic-generator")
 
-# ── Constants ────────────────────────────────────────────────────────────────
+
+# - Constants -
 DPI = 300
-PAGE_W = int(8.5 * DPI)   # 2550
-PAGE_H = int(11.0 * DPI)  # 3300
+PAGE_W = int(8.5 * DPI)
+PAGE_H = int(11.0 * DPI)
 GUTTER = 44
 COLS = 2
 ROWS = 3
@@ -31,31 +32,16 @@ TITLE_H = 220
 CAPTION_H = 200
 PANEL_GEN_SIZE = 768
 
-# ── Model IDs (hardcoded — best options for this hardware) ───────────────────
-# FLUX.1-dev via Diffusers — no LoRA, no IP-Adapter.
-# FLUX's built-in T5-XXL text encoder handles long, detailed prompts
-# (character descriptions, scene composition) natively, giving us
-# high cross-panel character consistency without external IP-Adapter.
 IMAGE_MODEL_ID = "black-forest-labs/FLUX.1-dev"
-
-# FLUX.1-dev quality defaults: 28 steps is the sweet spot between
-# fidelity and speed for comic-panel-sized outputs.
 PANEL_INFERENCE_STEPS = 28
-
-# FLUX uses classifier-free guidance; 5.0 is the recommended default
-# and produces vivid, well-composed outputs without over-saturation.
 GUIDANCE_SCALE = 5.0
-
-# Qwen2.5-3B-Instruct: ~3x faster than 7B on this GPU, still strong at the
-# 6-panel structured story task. The 7B variant was overkill for the work
-# and made the retry loop painful when the LLM produced malformed output.
 TEXT_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
 
 
-# ── Data Classes ─────────────────────────────────────────────────────────────
+# - Data Classes -
 @dataclass
 class Panel:
     index: int
@@ -80,16 +66,11 @@ class ComicStory:
     art_style: str
     character_bible: str
     panels: list[Panel] = field(default_factory=list)
-    # Hidden reference image of all characters together. Generated up front
-    # and used as a textual character description source for every panel
-    # prompt so character identity stays consistent across panels —
-    # including for characters that don't appear until later in the plot.
-    # Not rendered in the final comic page.
     master_reference: Optional[Image.Image] = None
     characters: list[Character] = field(default_factory=list)
 
 
-# ── Random Story Themes ──────────────────────────────────────────────────────
+# - Random Story Themes -
 RANDOM_THEMES = [
     "A brave little mouse goes on an adventure in a big city",
     "Two best friends discover a magical garden behind their school",
@@ -109,7 +90,7 @@ RANDOM_THEMES = [
 ]
 
 
-# ── Text Generator ───────────────────────────────────────────────────────────
+# - Text Generator -
 class TextGenerator:
     """Generates comic story structure as JSON using Qwen2.5-7B-Instruct."""
 
@@ -123,9 +104,7 @@ class TextGenerator:
         if self.pipe is not None:
             return
         from transformers import pipeline
-        logger.info(f"Loading text model: {self.model_id}")
-        # Use explicit device (not device_map="auto") so .to("cpu"/"cuda") works
-        # cleanly when we shuttle the model off-GPU during image generation.
+        logger.info("Loading text model: " + self.model_id)
         self.pipe = pipeline(
             "text-generation",
             model=self.model_id,
@@ -133,16 +112,10 @@ class TextGenerator:
             device=DEVICE,
             trust_remote_code=True,
         )
-        logger.info(f"Text model loaded successfully on device: {self.pipe.device}")
+        logger.info("Text model loaded successfully on device: " + str(self.pipe.device))
 
     def generate(self, prompt: str, max_tokens: int = 1500) -> str:
-        """Generate text from a prompt.
-
-        Uses a structured plain-text format (not JSON) for the story —
-        empirically far more reliable on small models than JSON, which
-        breaks on a single missing comma or unescaped quote. max_tokens
-        is sized for the full 6-panel story plus headroom.
-        """
+        """Generate text from a prompt."""
         with self._lock:
             self.load()
             messages = [
@@ -168,11 +141,8 @@ class TextGenerator:
                 return_full_text=False,
             )
             logger.info("Text generation inference complete.")
-            
-            # Ensure GPU work is done and clean up
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-
             generated = out[0]["generated_text"]
             if isinstance(generated, list):
                 return generated[-1]["content"].strip()
@@ -187,15 +157,15 @@ class TextGenerator:
                 raw = self.generate(prompt, max_tokens=2000)
                 raw_trimmed = raw[:500] + "..." if len(raw) > 500 else raw
                 result = _parse_story_text(raw, synopsis)
-                logger.info(f"Story generation succeeded on attempt {attempt + 1}. Panels: {len(result.panels)}")
+                logger.info("Story generation succeeded on attempt " + str(attempt + 1) + ". Panels: " + str(len(result.panels)))
                 return result
             except (KeyError, ValueError) as e:
                 raw_short = raw[:800] + "..." if len(raw) > 800 else raw
-                logger.warning(f"Story generation attempt {attempt + 1} failed: {e}")
-                logger.warning(f"Raw output: {raw_short}")
+                logger.warning("Story generation attempt " + str(attempt + 1) + " failed: " + str(e))
+                logger.warning("Raw output: " + raw_short)
                 if attempt == max_retries - 1:
                     raise ValueError(
-                        f"Failed to generate valid story after {max_retries} attempts: {e}"
+                        "Failed to generate valid story after " + str(max_retries) + " attempts: " + str(e)
                     )
         raise ValueError("Story generation failed")
 
@@ -207,39 +177,36 @@ class TextGenerator:
             try:
                 raw = self.generate(prompt, max_tokens=900)
                 result = _parse_reference_profile_text(raw, synopsis, title)
-                logger.info(f"Reference profile generation succeeded on attempt {attempt + 1}.")
+                logger.info("Reference profile generation succeeded on attempt " + str(attempt + 1) + ".")
                 return result
             except (KeyError, ValueError) as e:
                 raw_short = raw[:800] + "..." if len(raw) > 800 else raw
-                logger.warning(f"Reference profile generation attempt {attempt + 1} failed: {e}")
-                logger.warning(f"Raw output: {raw_short}")
+                logger.warning("Reference profile generation attempt " + str(attempt + 1) + " failed: " + str(e))
+                logger.warning("Raw output: " + raw_short)
                 if attempt == max_retries - 1:
                     raise ValueError(
-                        f"Failed to generate valid reference profile after {max_retries} attempts: {e}"
+                        "Failed to generate valid reference profile after " + str(max_retries) + " attempts: " + str(e)
                     )
         raise ValueError("Reference profile generation failed")
 
     def generate_random_synopsis(self, theme: Optional[str] = None) -> str:
-        """Generate a longer random story synopsis (5-8 sentences).
-        
-        This synopsis provides a clear situation/setup, a conflict/action, and a brief resolution,
-        making it suitable for splitting into six comic panels.
-        """
+        """Generate a longer random story synopsis (5-8 sentences)."""
         if theme:
             prompt = (
-                f"Generate a fun children's comic book synopsis (5-8 sentences) about the theme: '{theme}'. "
-                f"It should include a clear situation or setup, a conflict or action, and a short resolution. "
-                f"Respond with ONLY the synopsis text, nothing else."
+                "Generate a fun children's comic book synopsis (5-8 sentences) about the theme: '"
+                + theme + "'. "
+                "It should include a clear situation or setup, a conflict or action, and a short resolution. "
+                "Respond with ONLY the synopsis text, nothing else."
             )
         else:
-            # Pick a random base theme and ask the LLM to elaborate into a mini-story
             base = random.choice(RANDOM_THEMES)
             prompt = (
-                f"Expand this into a fun children's comic book synopsis (5-8 sentences): '{base}'. "
-                f"Make sure it has a clear situation/setup, a conflict/action, and a brief resolution. "
-                f"Respond with ONLY the synopsis text, nothing else."
+                "Expand this into a fun children's comic book synopsis (5-8 sentences): '"
+                + base + "'. "
+                "Make sure it has a clear situation/setup, a conflict/action, and a brief resolution. "
+                "Respond with ONLY the synopsis text, nothing else."
             )
-        
+
         with self._lock:
             self.load()
             messages = [
@@ -254,11 +221,8 @@ class TextGenerator:
                 temperature=0.8,
                 return_full_text=False,
             )
-            
-            # Ensure GPU work is done and clean up
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-
             generated = out[0]["generated_text"]
             if isinstance(generated, list):
                 return generated[-1]["content"].strip()
@@ -268,9 +232,9 @@ class TextGenerator:
     def generate_title(self, synopsis: str) -> str:
         """Generate a catchy title for the story based on the synopsis."""
         prompt = (
-            f"Generate a catchy, fun title (max 5 words) for a children's comic book based on this synopsis:\n"
-            f"'{synopsis}'\n\n"
-            f"Respond with ONLY the title text, nothing else."
+            "Generate a catchy, fun title (max 5 words) for a children's comic book based on this synopsis:\n"
+            "'" + synopsis + "'\n\n"
+            "Respond with ONLY the title text, nothing else."
         )
         with self._lock:
             self.load()
@@ -285,10 +249,8 @@ class TextGenerator:
                 temperature=0.7,
                 return_full_text=False,
             )
-            
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-
             generated = out[0]["generated_text"]
             if isinstance(generated, list):
                 return generated[-1]["content"].strip().strip('"').strip("'")
@@ -297,66 +259,65 @@ class TextGenerator:
 
 
 def _build_story_prompt(synopsis: str) -> str:
-    """Build the structured plain-text prompt for a comic story.
-
-    A plain-text labeled format is used instead of JSON. Small instruction-
-    tuned models (3–7B) reliably break JSON on long outputs (missing commas,
-    unescaped quotes inside captions). The same models reproduce a labeled
-    plain-text format almost perfectly because there is no syntax to break.
-    """
-    return f"""Write a 6-panel children's comic book story based on this synopsis:
-"{synopsis}"
-
-Use EXACTLY the following labeled plain-text format. Do not output JSON.
-Do not output markdown. Do not add any commentary before or after.
-
-TITLE: <story title on one line>
-
-ART_STYLE: <one short sentence describing the visual style, e.g. "modern 3D animation style, cinematic lighting, high detail">
-
-CHARACTER_BIBLE: <one paragraph describing EVERY character that appears in ANY panel of this story, including characters introduced in later panels (e.g., aliens that show up only in panel 3 or 4). For each character cover: species/type, body shape, dominant colors and markings, distinctive features, clothing/accessories.>
-
-PANEL 1
-CHARACTERS: <comma-separated list of character names appearing in this panel; use the same name spellings across panels>
-SCENE: <vivid literal visual description of the panel — characters, setting, action; suitable as an image-generation prompt>
-CAPTION: <exactly 3 to 5 sentences (50 to 70 words) of narration for kids learning to read>
-
-PANEL 2
-CHARACTERS: ...
-SCENE: ...
-CAPTION: ...
-
-(Continue with PANEL 3, PANEL 4, PANEL 5, and PANEL 6 in the same format.)
-
-Keep the story positive and educational. Output exactly six panels labeled
-PANEL 1 through PANEL 6."""
+    """Build the structured plain-text prompt for a comic story."""
+    return (
+        "Write a 6-panel children's comic book story based on this synopsis:\n"
+        '"' + synopsis + '"\n\n'
+        "Use EXACTLY the following labeled plain-text format. Do not output JSON.\n"
+        "Do not output markdown. Do not add any commentary before or after.\n\n"
+        "TITLE: <story title on one line>\n\n"
+        "ART_STYLE: <one short sentence describing the visual style, e.g. \"modern 3D animation style, cinematic lighting, high detail\">\n\n"
+        "CHARACTER_BIBLE: <one single paragraph describing EVERY character that appears in ANY panel of this story, including characters introduced in later panels. For EACH character provide ALL of the following details in a single flowing paragraph:\n"
+        "- Full name\n"
+        "- Species/type (human, cat, robot, dragon, etc.)\n"
+        "- Body shape and size (tall, short, chubby, slim, tiny, large, etc.)\n"
+        "- Exact HAIR COLOR and HAIR STYLE (e.g., \"long curly red hair\", \"short black buzzcut\", \"blue braided ponytail\")\n"
+        "- Exact EYE COLOR (e.g., \"big green eyes\", \"dark brown eyes\", \"golden amber eyes\")\n"
+        "- Exact SKIN TONE (e.g., \"fair pale skin\", \"medium brown skin\", \"dark brown skin\", \"warm olive skin\")\n"
+        "- Exact CLOTHING with specific COLORS and garment types (e.g., \"red hoodie with blue jeans and white sneakers\", \"purple wizard robe with gold stars and brown boots\")\n"
+        "- Any DISTINCTIVE MARKINGS or ACCESSORIES (e.g., \"a scar on left cheek\", \"round glasses\", \"a silver necklace\", \"freckles\", \"cat whiskers\", \"a magic wand\")\n"
+        "- Overall personality vibe or posture if relevant (e.g., \"always smiling\", \"shy and hunched\", \"confident stance with arms crossed\")\n\n"
+        "IMPORTANT: The CHARACTER_BIBLE must be a SINGLE paragraph (no bullet points, no line breaks within it) so it can be parsed reliably. Separate each character's description with a period and space. Make descriptions vivid and specific - NEVER say \"colorful clothes\" or \"nice hair\" without specifying exact colors and styles.>\n\n"
+        "PANEL 1\n"
+        "CHARACTERS: <comma-separated list of character names appearing in this panel; use the same name spellings across all panels>\n"
+        "SCENE: <vivid literal visual description of the panel - characters, setting, action; suitable as an image-generation prompt>\n"
+        "CAPTION: <exactly 3 to 5 sentences (50 to 70 words) of narration for kids learning to read>\n\n"
+        "PANEL 2\n"
+        "CHARACTERS: ...\n"
+        "SCENE: ...\n"
+        "CAPTION: ...\n\n"
+        "(Continue with PANEL 3, PANEL 4, PANEL 5, and PANEL 6 in the same format.)\n\n"
+        "Keep the story positive and educational. Output exactly six panels labeled\n"
+        "PANEL 1 through PANEL 6."
+    )
 
 
 def _build_reference_profile_prompt(synopsis: str, title: str) -> str:
     """Build metadata only for Step 3 reference generation."""
-    return f"""Create character reference metadata for this children's comic book.
+    return (
+        "Create character reference metadata for this children's comic book.\n\n"
+        "TITLE: " + title + "\n\n"
+        'SYNOPSIS: "' + synopsis + '"\n\n'
+        "Use EXACTLY the following labeled plain-text format. Do not output JSON.\n"
+        "Do not output markdown. Do not add panels, scenes, captions, or commentary.\n\n"
+        "TITLE: <story title on one line>\n\n"
+        "ART_STYLE: <one short sentence describing the visual style, e.g. \"modern 3D animation style, cinematic lighting, high detail\">\n\n"
+        "CHARACTER_BIBLE: <one single paragraph describing EVERY important character likely to appear in this story. For EACH character provide ALL of the following details in a single flowing paragraph:\n"
+        "- Full name\n"
+        "- Species/type (human, cat, robot, dragon, etc.)\n"
+        "- Body shape and size (tall, short, chubby, slim, tiny, large, etc.)\n"
+        "- Exact HAIR COLOR and HAIR STYLE (e.g., \"long curly red hair\", \"short black buzzcut\", \"blue braided ponytail\")\n"
+        "- Exact EYE COLOR (e.g., \"big green eyes\", \"dark brown eyes\", \"golden amber eyes\")\n"
+        "- Exact SKIN TONE (e.g., \"fair pale skin\", \"medium brown skin\", \"dark brown skin\", \"warm olive skin\")\n"
+        "- Exact CLOTHING with specific COLORS and garment types (e.g., \"red hoodie with blue jeans and white sneakers\", \"purple wizard robe with gold stars and brown boots\")\n"
+        "- Any DISTINCTIVE MARKINGS or ACCESSORIES (e.g., \"a scar on left cheek\", \"round glasses\", \"a silver necklace\", \"freckles\", \"cat whiskers\", \"a magic wand\")\n"
+        "- Overall personality vibe or posture if relevant\n\n"
+        "IMPORTANT: The CHARACTER_BIBLE must be a SINGLE paragraph (no bullet points, no line breaks within it). Separate each character's description with a period and space. Make descriptions vivid and specific - NEVER say \"colorful clothes\" or \"nice hair\" without specifying exact colors and styles. This is critical for generating a consistent reference image.>"
+    )
 
-TITLE: {title}
 
-SYNOPSIS: "{synopsis}"
-
-Use EXACTLY the following labeled plain-text format. Do not output JSON.
-Do not output markdown. Do not add panels, scenes, captions, or commentary.
-
-TITLE: <story title on one line>
-
-ART_STYLE: <one short sentence describing the visual style, e.g. "modern 3D animation style, cinematic lighting, high detail">
-
-CHARACTER_BIBLE: <one paragraph describing EVERY important character likely to appear in this story. For each character cover: species/type, body shape, dominant colors and markings, distinctive features, clothing/accessories.>"""
-
-
-# Top-level header fields that appear before PANEL 1.
 _HEADER_FIELDS = ("TITLE", "ART_STYLE", "CHARACTER_BIBLE")
 
-# Per-panel field block. We anchor on "PANEL <n>" and grab the three labeled
-# sub-fields up to the next PANEL marker or end of string. DOTALL lets fields
-# span multiple lines, which is fine because the next field label terminates
-# the current one via lookahead.
 _PANEL_BLOCK_RE = re.compile(
     r"PANEL\s+(\d+)\b(.*?)(?=\bPANEL\s+\d+\b|\Z)",
     re.IGNORECASE | re.DOTALL,
@@ -373,19 +334,13 @@ _HEADER_FIELD_RE = re.compile(
 
 
 def _auto_detect_characters(character_bible: str) -> list[Character]:
-    """Parse a list of characters from the LLM-generated character bible.
-    
-    Tries to be robust against various formats (bulleted lists, colons, bolding).
-    Returns a list of Character objects with names and descriptions.
-    """
+    """Parse a list of characters from the LLM-generated character bible."""
     if not character_bible:
         return []
-        
+
     characters = []
-    
-    # Split by lines first to handle list formats
     lines = [line.strip() for line in character_bible.split('\n') if line.strip()]
-    
+
     EXCLUDED_WORDS = {
         'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
         'where', 'how', 'why', 'what', 'which', 'who', 'whom', 'whose',
@@ -396,27 +351,19 @@ def _auto_detect_characters(character_bible: str) -> list[Character]:
     }
 
     for line in lines:
-        # 1. Try to match list patterns: "- Name: Description" or "* Name: Description" or "1. Name: Description"
-        # Also handles bolding like "- **Name**: Description"
         list_match = re.match(r'^[\-\*\d\.]*\s*(?:\*\*)?([A-Z][^:]+?)(?:\*\*)?\s*[:\-]\s*(.+)$', line)
         if list_match:
             name = list_match.group(1).strip()
             desc = list_match.group(2).strip()
-            
-            # Clean up name (remove extra bolding or trailing punctuation)
             name = re.sub(r'[\*\:]', '', name).strip()
-            
             if name.lower() not in EXCLUDED_WORDS and len(name) >= 2:
                 characters.append(Character(name=name, description=desc))
                 continue
 
-        # 2. If not a list item, try sentence-based approach for this line
         segments = re.split(r'(?<=[.!?])\s+(?=[A-Z])', line)
         for segment in segments:
             segment = segment.strip()
             if not segment: continue
-            
-            # Pattern: "Name is/was a..."
             m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|was)\s+(?:a|an|the)?\s*(.+)$', segment, re.IGNORECASE)
             if m:
                 name = m.group(1).strip()
@@ -424,31 +371,26 @@ def _auto_detect_characters(character_bible: str) -> list[Character]:
                 if name.lower() not in EXCLUDED_WORDS and len(name) >= 2:
                     characters.append(Character(name=name, description=desc))
             else:
-                # Fallback: first capitalized word as name, rest as description
                 words = segment.split()
                 if words and words[0][0].isupper() and len(words) > 1:
                     name = words[0].strip('.,:;()')
                     name_lower = name.lower()
-                    
                     if name_lower not in EXCLUDED_WORDS and len(name) >= 3:
                         desc = ' '.join(words[1:])[:150]
                         characters.append(Character(name=name, description=desc))
-    
-    # Deduplicate by name
+
     seen = set()
     unique_chars = []
     for c in characters:
         if c.name.lower() not in seen:
             seen.add(c.name.lower())
             unique_chars.append(c)
-            
     return unique_chars
 
 
 def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
     """Parse the labeled plain-text comic format into a ComicStory."""
     text = raw.strip()
-    # Strip markdown fences if the model wrapped the response anyway.
     if text.startswith("```"):
         nl = text.find("\n")
         if nl != -1:
@@ -456,16 +398,15 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
         if text.rstrip().endswith("```"):
             text = text.rstrip()[:-3]
 
-    # Split off the header (everything before PANEL 1) for the top-level fields.
     panel1_match = re.search(r"\bPANEL\s+1\b", text, re.IGNORECASE)
     header = text[: panel1_match.start()] if panel1_match else text
 
-    headers: dict[str, str] = {}
+    headers = {}
     for m in _HEADER_FIELD_RE.finditer(header):
         headers[m.group(1).upper()] = m.group(2).strip()
 
-    panels: list[Panel] = []
-    seen_indices: set[int] = set()
+    panels = []
+    seen_indices = set()
     for block in _PANEL_BLOCK_RE.finditer(text):
         idx_1based = int(block.group(1))
         if idx_1based in seen_indices:
@@ -473,7 +414,7 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
         seen_indices.add(idx_1based)
         body = block.group(2)
 
-        fields: dict[str, str] = {}
+        fields = {}
         for fm in _PANEL_FIELD_RE.finditer(body):
             fields[fm.group(1).upper()] = fm.group(2).strip()
 
@@ -483,20 +424,18 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
         characters = [c.strip() for c in re.split(r"[,;]\s*", chars_raw) if c.strip()]
 
         if not scene or not caption:
-            logger.debug(f"Panel {idx_1based} dropped: scene={'yes' if scene else 'NO'}, caption={'yes' if caption else 'NO'}")
-            # An incomplete panel block — drop it, the retry loop will handle it.
+            logger.debug("Panel " + str(idx_1based) + " dropped: scene=" + ("yes" if scene else "NO") + ", caption=" + ("yes" if caption else "NO"))
             continue
 
         panels.append(
             Panel(
-                index=idx_1based - 1,  # store 0-based to keep render logic identical
+                index=idx_1based - 1,
                 characters=characters,
                 image_prompt=scene,
                 caption=caption,
             )
         )
 
-    # Pad or truncate to exactly 6 panels
     while len(panels) < 6:
         panels.append(
             Panel(
@@ -508,11 +447,8 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
             )
         )
     panels = panels[:6]
-
-
     panels.sort(key=lambda p: p.index)
 
-    # Auto-detect characters from character_bible
     character_bible = headers.get("CHARACTER_BIBLE", "")
     characters = _auto_detect_characters(character_bible)
 
@@ -535,7 +471,7 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
         if text.rstrip().endswith("```"):
             text = text.rstrip()[:-3]
 
-    headers: dict[str, str] = {}
+    headers = {}
     for m in _HEADER_FIELD_RE.finditer(text):
         headers[m.group(1).upper()] = m.group(2).strip()
 
@@ -555,20 +491,9 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
     )
 
 
-
-# ── VAE Stability Patch (gfx1151) ────────────────────────────────────────────
+# - VAE Stability Patch (gfx1151) -
 def _patch_vae_for_cpu_execution(vae):
-    """Pin VAE to CPU (fp32) and route encode/decode through CPU.
-
-    On gfx1151 (Strix Halo / Ryzen AI Max) the VAE decode at the end of
-    generation hits conv shapes whose MIOpen solver hangs the GPU ring;
-    the kernel watchdog then resets the device and takes the host
-    compositor down with it. Keeping the VAE on CPU sidesteps the entire
-    class of hang. The VAE is small and a decode finishes in ~1–2s on
-    this hardware — a fine trade for not crashing the desktop. This is
-    architecture-agnostic; the same patch works for AutoencoderKL (SDXL)
-    and AutoencoderKLFlux2 (ERNIE) alike.
-    """
+    """Pin VAE to CPU (fp32) and route encode/decode through CPU."""
     vae.to(device="cpu", dtype=torch.float32)
     vae.eval()
 
@@ -590,18 +515,9 @@ def _patch_vae_for_cpu_execution(vae):
     return vae
 
 
-# ── Image Generator ──────────────────────────────────────────────────────────
+# - Image Generator -
 class ImageGenerator:
-    """Generates comic panel images using FLUX.1-dev.
-
-    The character-consistency strategy is:
-      1. Generate a master reference image (text2img).
-      2. Extract full character descriptions from the reference story data.
-      3. For each panel, embed the complete character descriptions directly
-         into the text prompt. FLUX's T5-XXL text encoder is excellent at
-         following detailed character prompts, giving us high cross-panel
-         consistency without IP-Adapter.
-    """
+    """Generates comic panel images using FLUX.1-dev."""
 
     def __init__(self, model_id: str = IMAGE_MODEL_ID):
         self.model_id = model_id
@@ -612,24 +528,15 @@ class ImageGenerator:
         """Load FLUX.1-dev pipeline, with VAE on CPU."""
         if self.pipe is not None:
             return
-
         from diffusers import FluxPipeline
-
-        logger.info(f"Loading FLUX.1-dev base: {self.model_id}")
-
+        logger.info("Loading FLUX.1-dev base: " + self.model_id)
         self.pipe = FluxPipeline.from_pretrained(
             self.model_id,
             torch_dtype=DTYPE,
             use_safetensors=True,
         ).to(DEVICE)
-
-        # FLUX.1-dev does not use IP-Adapter. Character consistency is
-        # handled via detailed text prompts generated by the T5-XXL encoder.
-
-        # gfx1151 stability — see _patch_vae_for_cpu_execution.
         self.pipe.vae = _patch_vae_for_cpu_execution(self.pipe.vae)
         logger.info("VAE pinned to CPU/fp32 for gfx1151 stability.")
-
         logger.info("FLUX.1-dev loaded.")
 
     def generate(
@@ -642,26 +549,11 @@ class ImageGenerator:
         reference_image: Optional[Image.Image] = None,
         step_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Image.Image:
-        """Generate an image from a text prompt using FLUX.1-dev.
-
-        FLUX does not use IP-Adapter. Character consistency is achieved
-        by embedding full character descriptions into the text prompt
-        (see _panel_prompt). The reference_image parameter is kept for
-        API compatibility and future img2img support, but is not used
-        in the current FLUX pipeline.
-
-        guidance defaults to 5.0 (standard FLUX classifier-free guidance).
-
-        step_callback, if provided, is called after each inference step
-        with (current_step, total_steps) to report progress.
-        """
+        """Generate an image from a text prompt using FLUX.1-dev."""
         import gc
 
         with self._lock:
             self.load()
-
-            # Drain anything left over (text-gen logits, prior panel
-            # latents) before kicking off another GPU job. Cheap to do.
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -669,13 +561,10 @@ class ImageGenerator:
 
             seed = int.from_bytes(os.urandom(4), "big")
 
-            # Build a diffusers-compatible step-end callback that adapts to
-            # our simpler (step, total) signature.
             cb_kwargs = {}
             if step_callback is not None:
                 total_steps = steps
                 def _on_step_end(pipe, step_index, timestep, callback_kwargs):
-                    # step_index is 0-based; report 1-based for the UI
                     step_callback(step_index + 1, total_steps)
                     return callback_kwargs
                 cb_kwargs["callback_on_step_end"] = _on_step_end
@@ -690,7 +579,7 @@ class ImageGenerator:
                     generator=torch.Generator(device=DEVICE).manual_seed(seed),
                     **cb_kwargs,
                 )
-            logger.info(f"Image generation complete for prompt: {prompt[:50]}...")
+            logger.info("Image generation complete for prompt: " + prompt[:50] + "...")
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -700,9 +589,9 @@ class ImageGenerator:
             return result.images[0]
 
 
-# ── Comic Page Renderer ──────────────────────────────────────────────────────
+# - Comic Page Renderer -
 def compute_panel_rects():
-    """Compute the (x, y, w, h) rectangles for a 2×3 panel grid."""
+    """Compute the (x, y, w, h) rectangles for a 2x3 panel grid."""
     usable_w = PAGE_W - GUTTER * (COLS + 1)
     usable_h = PAGE_H - TITLE_H - GUTTER * (ROWS + 1)
     pw = usable_w // COLS
@@ -717,11 +606,10 @@ def compute_panel_rects():
 
 
 def render_page(story: ComicStory) -> Image.Image:
-    """Render the full comic page as an 8.5×11" PIL Image."""
+    """Render the full comic page as an 8.5x11" PIL Image."""
     page = Image.new("RGB", (PAGE_W, PAGE_H), (255, 255, 255))
     draw = ImageDraw.Draw(page)
 
-    # Load fonts
     try:
         font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 96)
         font_caption = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32)
@@ -731,19 +619,16 @@ def render_page(story: ComicStory) -> Image.Image:
         font_caption = font_title
         font_badge = font_title
 
-    # Title banner — white background with black text for ink-saving prints
     draw.rectangle([0, 0, PAGE_W, TITLE_H], fill=(255, 255, 255))
     tx = PAGE_W // 2
     ty = TITLE_H // 2
     draw.text((tx, ty), story.title, font=font_title, fill=(20, 20, 20), anchor="mm")
 
-    # Panels
     rects = compute_panel_rects()
     for i, (x, y, pw, ph) in enumerate(rects):
         panel = story.panels[i] if i < len(story.panels) else None
         img_h = ph - CAPTION_H
 
-        # Panel border
         draw.rectangle([x - 3, y - 3, x + pw + 3, y + ph + 3], fill=(20, 20, 60))
         draw.rectangle([x, y, x + pw, y + ph], fill=(255, 255, 255))
 
@@ -755,13 +640,12 @@ def render_page(story: ComicStory) -> Image.Image:
             draw.rectangle([x, y, x + pw, y + img_h], fill=(200, 200, 200))
             draw.text(
                 (x + pw // 2, y + img_h // 2),
-                f"Panel {i + 1}",
+                "Panel " + str(i + 1),
                 font=font_badge,
                 fill=(100, 100, 100),
                 anchor="mm",
             )
 
-        # Caption strip — white background for ink-saving
         draw.rectangle([x, y + img_h, x + pw, y + ph], fill=(255, 255, 255))
         if panel:
             _draw_wrapped_text(
@@ -770,7 +654,6 @@ def render_page(story: ComicStory) -> Image.Image:
                 fill=(20, 20, 20),
             )
 
-        # Panel number badge
         bx, by, br = x + 18, y + 18, 22
         draw.ellipse([bx - br, by - br, bx + br, by + br], fill=(20, 20, 60))
         draw.text((bx, by), str(i + 1), font=font_badge, fill=(255, 255, 255), anchor="mm")
@@ -812,13 +695,9 @@ def _draw_wrapped_text(
         ty += line_h
 
 
-# ── Generation Orchestrator ──────────────────────────────────────────────────
+# - Generation Orchestrator -
 def _panel_gen_dims(panel_index: int) -> tuple[int, int]:
-    """Return (width, height) the image model should generate for a panel.
-
-    SDXL was trained on (multiples of) 64-pixel buckets — keeping the
-    output dims aligned avoids resize artefacts inside the VAE.
-    """
+    """Return (width, height) the image model should generate for a panel."""
     rects = compute_panel_rects()
     pw, ph = rects[panel_index][2], rects[panel_index][3]
     img_h = ph - CAPTION_H
@@ -829,14 +708,7 @@ def _panel_gen_dims(panel_index: int) -> tuple[int, int]:
 
 
 def _build_character_profiles(characters: list[Character], art_style: str) -> str:
-    """Build detailed, visually distinct character profiles for prompt injection.
-
-    Each character gets an explicit visual identity block that emphasizes
-    uniqueness — the LLM-generated descriptions are often too generic,
-    causing characters to look alike (e.g., villagers becoming clones of Yuki).
-    This function adds differentiation instructions and expands brief
-    descriptions into full visual profiles.
-    """
+    """Build detailed, visually distinct character profiles for prompt injection."""
     if not characters:
         return ""
 
@@ -845,147 +717,410 @@ def _build_character_profiles(characters: list[Character], art_style: str) -> st
         name = c.name
         desc = c.description.strip()
 
-        # Build a rich visual profile for each character.
-        # We explicitly call out that this character must look DIFFERENT
-        # from all others, and we add distinguishing visual anchors.
         profile = (
-            f"{i + 1}. {name}:"
-            f" {desc}"
+            str(i + 1) + ". " + name + ": " + desc
         )
 
-        # If description is short, note it needs elaboration in the prompt
         if len(desc) < 50:
             profile += (
-                f" Give {name} a UNIQUE and visually distinct appearance "
-                f"that is clearly different from every other character — "
-                f"different body type, clothing, colors, and features."
+                " Give " + name + " a UNIQUE and visually distinct appearance "
+                "that is clearly different from every other character - "
+                "different body type, clothing, colors, and features."
             )
 
         profiles.append(profile)
 
-    # Add cross-character differentiation directive
     names = [c.name for c in characters]
     differentiator = (
-        f"IMPORTANT — CHARACTER DIFFERENTIATION: "
-        f"All {len(characters)} characters ({', '.join(names)}) must have visually DISTINCT appearances. "
-        f"No two characters should look alike. Differentiate them through "
-        f"species, body proportions, height, dominant colors, clothing style, "
-        f"hairstyle, accessories, and any other visual features. "
-        f"If the story includes background characters or villagers, they must "
-        f"also look different from the main characters and from each other."
+        "IMPORTANT - CHARACTER DIFFERENTIATION: "
+        "All " + str(len(characters)) + " characters (" + ", ".join(names) +
+        ") must have visually DISTINCT appearances. "
+        "No two characters should look alike. Differentiate them through "
+        "species, body proportions, height, hair color and style, eye color, "
+        "skin tone, dominant clothing colors, clothing style, hairstyle, "
+        "accessories, and any other visual features. "
+        "If the story includes background characters or villagers, they must "
+        "also look different from the main characters and from each other."
     )
 
     return "\n".join(profiles) + "\n\n" + differentiator
 
 
-def _build_story_context_block(story: ComicStory, panel: Panel, panel_index: int) -> str:
-    """Build a narrative context block that tells the model where this panel
-    sits in the overall story arc.
+def _match_word(word: str, keyword: str) -> bool:
+    """Check if a word matches a keyword, handling plural/suffix forms.
 
-    FLUX's long context window allows us to include the full synopsis,
-    the panel's position in the story, and surrounding panel summaries.
-    This dramatically improves story consistency because the model
-    understands the narrative flow rather than generating isolated scenes.
+    E.g., 'robes' matches 'robe', 'beard' matches 'beard'.
+    Uses simple startswith for plural/suffix variations.
     """
-    total_panels = len(story.panels)
+    clean = word.strip('.,;:!?()-')
+    # Exact match
+    if clean == keyword:
+        return True
+    # Plural/suffix: keyword must be >= 3 chars and clean word longer than keyword
+    if len(keyword) >= 3 and len(clean) > len(keyword) and clean.startswith(keyword):
+        return True
+    return False
 
-    # Build a concise summary of all panels for narrative anchoring
-    panel_summaries = []
-    for p in story.panels:
-        char_names = ", ".join(p.characters) if p.characters else "no characters specified"
-        # Show the panel scene briefly (capped at ~80 chars)
-        scene_preview = p.image_prompt[:80] + ("..." if len(p.image_prompt) > 80 else "")
-        panel_summaries.append(
-            f"  Panel {p.index + 1}: {scene_preview} [{char_names}]"
+
+def _extract_color_by_context(desc_lower: str, context_keywords: list[str],
+                              color_list: list[str]) -> list[str]:
+    """Extract colors that are associated with specific context keywords.
+
+    Instead of blindly matching color words anywhere in the description,
+    this checks if a color word appears near (within 3 words before) a
+    context keyword like 'hair', 'eyes', 'skin', 'hoodie', etc.
+    This prevents false matches like picking up 'blue' from 'blue hoodie'
+    as an eye color. Uses fuzzy matching for plural/suffix forms.
+    """
+    found = []
+    words_raw = desc_lower.split()
+    words = [w.strip('.,;:!?()-') for w in words_raw]
+    for i, word in enumerate(words):
+        is_context = any(_match_word(word, kw) for kw in context_keywords)
+        if is_context:
+            for j in range(max(0, i - 3), i):
+                # Check 2-word compound color first (e.g., "dark brown")
+                if j + 1 < i:
+                    two_word = words[j] + " " + words[j + 1]
+                    if two_word in color_list and two_word not in found:
+                        found.append(two_word)
+                # Then single word
+                if words[j] in color_list and words[j] not in found:
+                    is_part_of = any(words[j] in fc and fc != words[j] for fc in found)
+                    if not is_part_of:
+                        found.append(words[j])
+    return found
+
+
+def _build_character_style_dna(characters: list[Character]) -> str:
+    """Build an explicit per-character 'style DNA' block for maximum consistency.
+
+    This extracts or synthesizes granular visual attributes for each character:
+    hair color, hair style, eye color, skin tone, clothing color(s) and type,
+    accessories, body type, height, and any unique markings. Each attribute
+    is stated as an explicit factual declaration (not a suggestion) so the
+    image model treats them as hard constraints.
+
+    This block is included in BOTH the reference image prompt and every
+    panel prompt, giving FLUX's T5-XXL encoder the strongest possible signal
+    for cross-panel character consistency.
+    """
+    if not characters:
+        return ""
+
+    dna_parts = ["=== CHARACTER STYLE DNA (HARD CONSTRAINTS - DO NOT DEVIATE) ==="]
+    dna_parts.append(
+        "The following describes the EXACT visual appearance of each character. "
+        "Every image must depict each character with these attributes. "
+        "Do NOT change hair color, clothing color, skin tone, eye color, "
+        "or any other described feature between panels."
+    )
+    dna_parts.append("")
+
+    for i, c in enumerate(characters):
+        name = c.name
+        desc = c.description.strip()
+        desc_lower = desc.lower()
+
+        attr_lines = ["--- " + name + " (Character " + str(i + 1) + ") ---"]
+
+        # --- Hair Color ---
+        hair_context = ["hair", "haired", "head", "beard", "mustache", "moustache", "fur"]
+        hair_colors = ["black", "brown", "blonde", "red", "auburn", "white", "gray",
+                       "silver", "golden", "dark brown", "light brown", "blond",
+                       "ginger", "strawberry", "platinum", "chestnut", "jet"]
+        found_hair = _extract_color_by_context(desc_lower, hair_context, hair_colors)
+        if found_hair:
+            attr_lines.append("  HAIR COLOR: " + ", ".join(found_hair))
+            attr_lines.append("  NOTE: " + name + "'s hair must ALWAYS be " + ", ".join(found_hair) + " in every panel.")
+        else:
+            attr_lines.append(
+                "  HAIR COLOR: Assign a distinctive, specific hair color "
+                "unique to " + name + " and different from all other characters."
+            )
+
+        # --- Hair Style ---
+        hair_styles = ["long", "short", "curly", "straight", "wavy", "braided",
+                       "ponytail", "buns", "bob", "mohawk", "spiky", "slicked",
+                       "messy", "flowing", "pigtails", "dreadlocks", "afro",
+                       "crew cut"]
+        found_style = [hs for hs in hair_styles if hs in desc_lower]
+        if found_style:
+            attr_lines.append("  HAIR STYLE: " + ", ".join(found_style))
+        else:
+            attr_lines.append(
+                "  HAIR STYLE: Distinctive hairstyle that helps identify " + name +
+                " at a glance."
+            )
+
+        # --- Eye Color ---
+        eye_context = ["eye", "eyes", "eyed", "pupil"]
+        eye_colors = ["blue", "green", "brown", "hazel", "amber", "gray", "black",
+                       "red", "violet", "light blue", "dark brown", "gold",
+                       "steel", "honey", "emerald", "sapphire", "warm brown"]
+        found_eyes = _extract_color_by_context(desc_lower, eye_context, eye_colors)
+        if found_eyes:
+            attr_lines.append("  EYE COLOR: " + ", ".join(found_eyes))
+        else:
+            attr_lines.append(
+                "  EYE COLOR: Assign a specific, memorable eye color for " + name +
+                " that is different from other characters."
+            )
+
+        # --- Skin Tone ---
+        skin_context = ["skin", "complexion", "sun-kissed", "sun-touched", "olive-skinned", "fair-skinned"]
+        skin_tones = ["fair", "light", "medium", "tan", "brown", "dark", "deep",
+                       "pale", "olive", "golden", "dark brown", "light brown",
+                       "porcelain", "ruddy", "sun-kissed"]
+        found_skin = _extract_color_by_context(desc_lower, skin_context, skin_tones)
+        if found_skin:
+            attr_lines.append("  SKIN TONE: " + ", ".join(found_skin))
+        else:
+            attr_lines.append(
+                "  SKIN TONE: Assign a specific skin tone for " + name +
+                " that remains consistent across all panels."
+            )
+
+        # --- Clothing Color and Type ---
+        all_clothing = ["hoodie", "jacket", "shirt", "dress", "cape", "hat",
+                        "scarf", "gloves", "boots", "shoes", "sneakers", "pants", "shorts",
+                        "skirt", "sweater", "vest", "tunic", "robe", "overalls",
+                        "suspenders", "bow tie", "necktie", "crown", "tiara",
+                        "helmet", "mask", "cloak", "sash", "collar"]
+        clothing_colors = ["red", "blue", "green", "yellow", "orange", "purple",
+                           "pink", "white", "black", "gray", "brown", "navy",
+                           "scarlet", "teal", "maroon", "turquoise", "magenta",
+                           "crimson", "gold", "silver", "beige", "ivory", "lavender"]
+        found_colors = _extract_color_by_context(desc_lower, all_clothing, clothing_colors)
+        found_types = [k for k in all_clothing if k in desc_lower
+                       and k not in ["pants", "shorts", "skirt"]]
+        if found_colors or found_types:
+            if found_colors:
+                attr_lines.append("  CLOTHING COLORS: " + ", ".join(found_colors))
+            if found_types:
+                attr_lines.append("  CLOTHING/ACCESSORIES: " + ", ".join(found_types))
+            attr_lines.append(
+                "  NOTE: " + name + "'s clothing colors and style must remain EXACTLY "
+                "the same in every panel."
+            )
+        else:
+            attr_lines.append(
+                "  CLOTHING: Assign specific, distinctive clothing with clear "
+                "colors and style for " + name + ". Must be consistent across all panels."
+            )
+
+        # --- Distinctive Markings / Accessories ---
+        marking_keywords = ["scar", "freckles", "glasses", "patch", "tattoo",
+                            "birthmark", "mole", "whiskers", "spots", "stripes",
+                            "horns", "wings", "tail", "antlers"]
+        found_markings = [m for m in marking_keywords if m in desc_lower]
+        if found_markings:
+            attr_lines.append("  DISTINCTIVE MARKINGS/ACCESSORIES: " + ", ".join(found_markings))
+        else:
+            attr_lines.append(
+                "  DISTINCTIVE MARKINGS: Note any unique features that distinguish "
+                + name + " from all other characters."
+            )
+
+        # --- Body Type / Species ---
+        species_keywords = ["cat", "dog", "rabbit", "dragon", "fox", "bear",
+                            "bird", "wolf", "deer", "mouse", "pig", "frog",
+                            "robot", "alien", "elf", "dwarf", "giant"]
+        body_keywords = ["tall", "short", "small", "large", "slim", "chubby",
+                         "thin", "muscular", "stocky", "tiny", "big"]
+        found_species = [s for s in species_keywords if s in desc_lower]
+        found_body = [b for b in body_keywords if b in desc_lower]
+        if found_species:
+            attr_lines.append("  SPECIES/TYPE: " + ", ".join(found_species))
+        if found_body:
+            attr_lines.append("  BODY TYPE: " + ", ".join(found_body))
+
+        # Summary line with original description
+        attr_lines.append("  FULL DESCRIPTION: " + desc)
+        attr_lines.append(
+            "  >> CONSISTENCY RULE: When generating ANY panel, " + name +
+            " must ALWAYS have these exact attributes. Never change, swap, or omit them."
         )
 
-    context = (
-        f"STORY SYNOPSIS: \"{story.synopsis}\"\n"
-        f"\n"
-        f"PANEL POSITION: Panel {panel_index + 1} of {total_panels}.\n"
-        f"\n"
-        f"FULL STORY OUTLINE:\n"
-    )
-    for summary in panel_summaries:
-        context += summary + "\n"
+        dna_parts.append("\n".join(attr_lines))
+        dna_parts.append("")
 
-    context += (
-        f"\n"
-        f"CURRENT PANEL: Panel {panel_index + 1} specifically depicts: {panel.image_prompt}\n"
-        f"Characters in THIS panel: {', '.join(panel.characters) if panel.characters else 'none specified'}\n"
-        f"\n"
-        f"IMPORTANT: This panel is one frame in a sequential story. "
-        f"The scene should flow naturally from the previous panels and lead into the next ones. "
-        f"Do NOT generate a random standalone scene — every element must serve the narrative. "
-        f"Match the art style, character appearances, and world established in the reference image."
+    # Add global cross-character consistency rules
+    dna_parts.append("=== GLOBAL CONSISTENCY RULES ===")
+    dna_parts.append(
+        "1. NO character can change their hair color, hairstyle, eye color, "
+        "skin tone, or clothing between panels."
+    )
+    dna_parts.append(
+        "2. Each character must be UNIQUELY identifiable by at least 2 visual "
+        "attributes (e.g., hair color + clothing color) that no other character shares."
+    )
+    dna_parts.append(
+        "3. If a character's exact attributes are unclear, maintain the MOST "
+        "PROMINENT visual features from the reference image."
+    )
+    dna_parts.append(
+        "4. Background characters and villagers must also have consistent "
+        "appearances if they appear in multiple panels."
+    )
+    dna_parts.append(
+        "5. Colors must be EXACT - if a character has a red hoodie and brown hair, "
+        "every panel must show that red hoodie and brown hair without variation."
     )
 
-    return context
+    return "\n".join(dna_parts)
+
+
+def _build_story_context_block(story: ComicStory, panel: Panel, panel_index: int) -> str:
+     """Build a narrative context block that tells the model where this panel
+     sits in the overall story arc.
+
+     FLUX's long context window allows us to include the full synopsis,
+     the panel's position in the story, and surrounding panel summaries.
+     This dramatically improves story consistency because the model
+     understands the narrative flow rather than generating isolated scenes.
+     """
+     total_panels = len(story.panels)
+
+     # Build a concise summary of all panels for narrative anchoring
+     panel_summaries = []
+     for p in story.panels:
+         char_names = ", ".join(p.characters) if p.characters else "no characters specified"
+         scene_preview = p.image_prompt[:80] + ("..." if len(p.image_prompt) > 80 else "")
+         panel_summaries.append(
+             "  Panel " + str(p.index + 1) + ": " + scene_preview + " [" + char_names + "]"
+         )
+
+     this_panel_chars = set(panel.characters) if panel.characters else set()
+     all_char_names = [c.name for c in story.characters]
+     excluded_chars = [name for name in all_char_names if name not in this_panel_chars]
+
+     context = (
+         'STORY SYNOPSIS: "' + story.synopsis + '"\n'
+         "\n"
+         "PANEL POSITION: Panel " + str(panel_index + 1) + " of " + str(total_panels) + ".\n"
+         "\n"
+         "FULL STORY OUTLINE:\n"
+     )
+     for summary in panel_summaries:
+         context += summary + "\n"
+
+     context += (
+         "\n"
+         "CURRENT PANEL: Panel " + str(panel_index + 1) +
+         " specifically depicts: " + panel.image_prompt + "\n"
+         "Characters in THIS panel: " +
+         (", ".join(panel.characters) if panel.characters else "none specified") + "\n"
+     )
+
+     if excluded_chars:
+         context += (
+             "\n"
+             "CHARACTERS NOT IN THIS PANEL (DO NOT INCLUDE): " + ", ".join(excluded_chars) + "\n"
+         )
+
+     context += (
+         "\n"
+         "IMPORTANT: This panel is one frame in a sequential story. "
+         "The scene should flow naturally from the previous panels and lead into the next ones. "
+         "Do NOT generate a random standalone scene - every element must serve the narrative. "
+         "Match the art style, character appearances, and world established in the reference image. "
+         "ONLY include characters listed under 'Characters in THIS panel'. "
+         "Characters listed under 'CHARACTERS NOT IN THIS PANEL' must NOT appear anywhere in the image. "
+         "The panel scene description above is the authoritative source for what this image must contain.\n"
+     )
+
+     return context
 
 
 def _panel_prompt(story: ComicStory, panel: Panel) -> str:
-    """Build the image prompt for a single panel with maximum consistency.
+     """Build the image prompt for a single panel with maximum consistency.
 
-    Strategy for FLUX.1-dev's T5-XXL encoder:
-      1. Art style directive (sets visual tone for everything)
-      2. Full story context + panel sequence position (narrative anchoring)
-      3. Specific scene description for this panel
-      4. Detailed character profiles with visual differentiation directives
-      5. Explicit cross-panel consistency reminders
+     Strategy for FLUX.1-dev's T5-XXL encoder:
+       1. Art style directive (sets visual tone for everything)
+       2. Full story context + panel sequence position (narrative anchoring)
+       3. Specific scene description for this panel
+       4. Detailed character profiles WITH EXCLUSIONS for characters not in this panel
+       5. Explicit character style DNA (hair color/style, eye color, skin tone,
+          clothing colors, accessories) as hard constraints
+       6. Global consistency rules
 
-    This replaces simple comma-concatenated prompts. By embedding the
-    full story synopsis, panel sequence context, and rich character
-    profiles with differentiation instructions, FLUX generates images
-    that are narratively connected and visually consistent across panels,
-    and prevents the "clone character" problem where all background
-    characters look the same.
-    """
-    # --- Part 1: Art style ---
-    art_style = story.art_style or "modern 3D animation style, cinematic lighting, high detail"
-    # Normalize: strip trailing period/dot so it does not double-punctuate
-    art_style = art_style.rstrip(".")
+     This replaces simple comma-concatenated prompts. By embedding the
+     full story synopsis, panel sequence context, rich character profiles,
+     and granular style DNA, FLUX generates images that are narratively
+     connected and visually consistent across panels.
+     """
+     art_style = story.art_style or "modern 3D animation style, cinematic lighting, high detail"
+     art_style = art_style.rstrip(".")
 
-    # --- Part 2: Full story context + panel position ---
-    story_context = _build_story_context_block(story, panel, panel.index)
+     story_context = _build_story_context_block(story, panel, panel.index)
+     panel_scene = panel.image_prompt
 
-    # --- Part 3: Specific scene for this panel ---
-    panel_scene = panel.image_prompt
+     this_panel_char_names = set(panel.characters) if panel.characters else set()
+     panel_characters = [c for c in story.characters if c.name in this_panel_char_names]
+     char_profiles = _build_character_profiles(panel_characters, art_style)
 
-    # --- Part 4: Rich character profiles with differentiation ---
-    char_profiles = _build_character_profiles(story.characters, art_style)
+     style_dna = _build_character_style_dna(story.characters)
 
-    # --- Part 5: Assemble prompt ---
-    prompt_parts = [
-        f"Art style: {art_style}.",
-        "",
-        "=== STORY CONTEXT ===",
-        story_context,
-        "",
-        "=== THIS PANEL SCENE ===",
-        panel_scene,
-    ]
+     excluded_char_names = [c.name for c in story.characters if c.name not in this_panel_char_names]
+     exclusion_block = ""
+     if excluded_char_names:
+         exclusion_block = (
+             "=== EXCLUDED CHARACTERS (DO NOT DEPICT) ===\n"
+             "The following characters must NOT appear anywhere in this image:\n"
+         )
+         for name in excluded_char_names:
+             desc = next((c.description for c in story.characters if c.name == name), "")
+             exclusion_block += "  - " + name + ": " + desc + "\n"
+         exclusion_block += (
+             "\nUnder no circumstances should these characters be visible in this panel. "
+             "If the scene description does not mention them, they must be absent.\n"
+         )
 
-    # Include character block only if we have profiles (the differentiation
-    # directives are critical for preventing clone-characters)
-    if char_profiles:
-        prompt_parts.extend([
-            "",
-            "=== CHARACTER IDENTITY GUIDE (MAINTAIN THESE EXACTLY) ===",
-            char_profiles,
-        ])
+     prompt_parts = [
+         "Art style: " + art_style + ".",
+         "",
+         "=== STORY CONTEXT ===",
+         story_context,
+         "",
+         "=== THIS PANEL SCENE ===",
+         panel_scene,
+     ]
 
-    prompt_parts.extend([
-        "",
-        "=== CONSISTENCY RULES (FOLLOW ALL) ===",
-        f"1. All characters must match their descriptions EXACTLY in every panel — same body, same colors, same clothing.",
-        f"2. Art style and color palette must be identical across all panels.",
-        f"3. This is panel {panel.index + 1} of {len(story.panels)} — the scene must be a natural frame within the complete story.",
-        f"4. Background and setting should be consistent with the story world described in the synopsis.",
-        f"5. No two characters look alike. Every character has a unique visual identity.",
-        f"6. If a character appears in this scene, their appearance must exactly match the reference image.",
-    ])
+     if char_profiles:
+         prompt_parts.extend([
+             "",
+             "=== CHARACTER IDENTITY GUIDE (MAINTAIN THESE EXACTLY) ===",
+             char_profiles,
+         ])
 
-    return "\n".join(prompt_parts)
+     if exclusion_block:
+         prompt_parts.extend([
+             "",
+             exclusion_block,
+         ])
+
+     if style_dna:
+         prompt_parts.extend([
+             "",
+             style_dna,
+         ])
+
+     prompt_parts.extend([
+         "",
+         "=== CONSISTENCY RULES (FOLLOW ALL) ===",
+         "1. All characters must match their descriptions EXACTLY in every panel - same body, same colors, same clothing.",
+         "2. Art style and color palette must be identical across all panels.",
+         "3. This is panel " + str(panel.index + 1) + " of " + str(len(story.panels)) +
+         " - the scene must be a natural frame within the complete story.",
+         "4. Background and setting should be consistent with the story world described in the synopsis.",
+         "5. No two characters look alike. Every character has a unique visual identity.",
+         "6. If a character appears in this scene, their appearance must exactly match the reference image.",
+         "7. ONLY depict characters listed in 'Characters in THIS panel' above. Characters listed in 'EXCLUDED CHARACTERS' must NOT appear.",
+         "8. Follow the CHARACTER STYLE DNA above as HARD CONSTRAINTS - never deviate from stated hair color, eye color, skin tone, or clothing colors.",
+     ])
+
+     return "\n".join(prompt_parts)
 
 
 def _generate_reference_prompt(story: ComicStory) -> str:
@@ -996,54 +1131,53 @@ def _generate_reference_prompt(story: ComicStory) -> str:
     an establishing frame that captures the story's setting and character poses
     relevant to the narrative.
 
-    Returns the full reference generation prompt with art style, scene context,
-    characters, and quality directives.
+    The prompt now includes the full CHARACTER STYLE DNA block so that the
+    reference image itself depicts each character with maximum visual specificity,
+    making it a reliable anchor for all subsequent panel generations.
     """
-    # Extract scene context from synopsis (first 1-2 sentences give opening context)
     synopsis_context = story.synopsis[:250] if story.synopsis else ""
 
-    # Build rich character descriptions with visual differentiation
     if story.characters:
         char_list_parts = []
         for i, c in enumerate(story.characters):
             desc = c.description.strip()
-            char_list_parts.append(f"{c.name}: {desc}")
-            # For characters with very brief descriptions, add differentiation guidance
+            char_list_parts.append(c.name + ": " + desc)
             if len(desc) < 40:
                 char_list_parts.append(
-                    f"  NOTE: {c.name} must look visually unique — "
-                    f"different species/body/clothes/colors from all other characters."
+                    "  NOTE: " + c.name + " must look visually unique - "
+                    "different species/body/clothes/colors from all other characters."
                 )
         char_list_str = ". ".join(char_list_parts)
         char_names = ", ".join([c.name for c in story.characters])
         char_desc = (
-            f"Characters in scene: {char_list_str}. "
-            f"All characters ({char_names}) are present together in one establishing shot. "
-            f"Each character must have a DISTINCT visual appearance — "
-            f"different species, body shapes, heights, dominant colors, clothing, "
-            f"and accessories. No character should look like a copy of another."
+            "Characters in scene: " + char_list_str + ". "
+            "All characters (" + char_names + ") are present together in one establishing shot. "
+            "Each character must have a DISTINCT visual appearance - "
+            "different species, body shapes, heights, dominant colors, clothing, "
+            "and accessories. No character should look like a copy of another."
         )
     else:
-        char_desc = f"Characters: {story.character_bible}"
+        char_desc = "Characters: " + story.character_bible
 
-    # Build a scene description based on synopsis context
     scene_context = (
-        f"Opening scene from the story: {synopsis_context} "
-        f"Show the characters positioned naturally as if starting the adventure, "
-        f"with natural poses and body language reflecting the story mood. "
-        f"Position all characters clearly and distinctly so each is fully visible. "
+        "Opening scene from the story: " + synopsis_context + " "
+        "Show the characters positioned naturally as if starting the adventure, "
+        "with natural poses and body language reflecting the story mood. "
+        "Position all characters clearly and distinctly so each is fully visible. "
     )
 
-    # Construct the full reference prompt
+    style_dna = _build_character_style_dna(story.characters)
+
     art_style = story.art_style or "modern 3D animation style, cinematic lighting, high detail"
     art_style = art_style.rstrip(".")
 
     prompt = (
-        f"{art_style}, establishing shot, "
-        f"{scene_context}"
-        f"Full-body view of all characters together, clear faces and distinguishing features, "
-        f"natural lighting, high quality illustration, no text, no labels. "
-        f"{char_desc}"
+        art_style + ", establishing shot, "
+        + scene_context
+        + "Full-body view of all characters together, clear faces and distinguishing features, "
+        "natural lighting, high quality illustration, no text, no labels. "
+        + char_desc
+        + "\n\n" + style_dna
     )
 
     return prompt
@@ -1054,22 +1188,13 @@ def generate_master_reference(
     img_gen: "ImageGenerator",
     step_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Image.Image:
-    """Generate the master character reference image via FLUX text2img.
-
-    The reference is generated from a text-only prompt derived from the
-    story synopsis and character bible. Since FLUX does not use IP-Adapter,
-    this image serves as the canonical visual reference for the story's
-    characters and setting. Its generated pixels are not passed to the
-    pipeline — only the extracted character descriptions feed into panel
-    prompts for cross-panel consistency.
-    """
+    """Generate the master character reference image via FLUX text2img."""
     gen_w, gen_h = _panel_gen_dims(0)
 
-    # Generate reference prompt based on synopsis + characters + style
     prompt = _generate_reference_prompt(story)
 
     logger.info("Generating master reference image from synopsis context...")
-    logger.debug(f"Reference prompt: {prompt[:150]}...")
+    logger.debug("Reference prompt: " + prompt[:150] + "...")
     img = img_gen.generate(
         prompt=prompt,
         width=gen_w,
@@ -1086,13 +1211,7 @@ def generate_all_panels(
     img_gen: ImageGenerator,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ):
-    """Generate images for all panels in a story.
-
-    A single master reference is generated up front for visual consistency.
-    Each panel then runs text2img with the full character descriptions
-    embedded in the prompt (leveraging FLUX's T5-XXL encoder for
-    cross-panel character consistency).
-    """
+    """Generate images for all panels in a story."""
     if story.master_reference is None:
         generate_master_reference(story, img_gen)
 
@@ -1100,7 +1219,7 @@ def generate_all_panels(
     for panel in story.panels:
         gen_w, gen_h = _panel_gen_dims(panel.index)
         full_prompt = _panel_prompt(story, panel)
-        logger.info(f"Generating panel {panel.index + 1}/{total}: {full_prompt[:80]}...")
+        logger.info("Generating panel " + str(panel.index + 1) + "/" + str(total) + ": " + full_prompt[:80] + "...")
 
         panel.image = img_gen.generate(
             prompt=full_prompt,
@@ -1126,14 +1245,11 @@ def regenerate_panel(
     if modification:
         panel.image_prompt = panel.image_prompt + ". " + modification
 
-    # Build the master reference lazily for stories that don't have one yet
-    # (e.g., regenerating a panel from a story generated under an older code
-    # path).
     if story.master_reference is None:
         generate_master_reference(story, img_gen)
 
     full_prompt = _panel_prompt(story, panel)
-    logger.info(f"Regenerating panel {panel_index + 1}: {full_prompt[:80]}...")
+    logger.info("Regenerating panel " + str(panel_index + 1) + ": " + full_prompt[:80] + "...")
 
     panel.image = img_gen.generate(
         prompt=full_prompt,
