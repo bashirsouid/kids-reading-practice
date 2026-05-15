@@ -34,6 +34,8 @@ export function ProjectLoader() {
               title: project.story.title || '',
               synopsis: project.story.synopsis || '',
               art_style: project.story.art_style || '',
+              story_setting: project.story.story_setting || '',
+              character_bible: project.story.character_bible || '',
               characters: project.story.characters || [],
               panels: project.story.panels || [],
             }

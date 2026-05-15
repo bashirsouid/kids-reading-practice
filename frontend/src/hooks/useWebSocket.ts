@@ -26,6 +26,8 @@ interface WebSocketMessage {
     title?: string;
     synopsis?: string;
     art_style?: string;
+    /** Shared world anchor injected into every panel prompt. */
+    story_setting?: string;
     character_bible?: string;
     characters?: Array<{ name: string; description: string }>;
     panels?: Array<{

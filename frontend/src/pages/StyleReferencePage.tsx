@@ -13,16 +13,40 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generateMasterReference, updateArtStyle } from '../services/api';
+import {
+  proceedToNextStage,
+  generateMasterReference,
+  updateArtStyle,
+  updateStorySetting,
+} from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
 import { Button } from '../components/ui/Button';
 import { useWebSocket } from '../hooks/useWebSocket';
 
+/** Trim a free-text field for the prompt preview, mirroring backend logic. */
+function trimSetting(s: string, max = 200): string {
+  const clean = (s || '').replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max);
+  const sp = cut.lastIndexOf(' ');
+  return (sp > max / 2 ? cut.slice(0, sp) : cut) + '...';
+}
+
+function compactCharAnchor(c: { name: string; description: string }, max = 260): string {
+  const desc = (c.description || '').replace(/\s+/g, ' ').trim();
+  if (!desc) return `${c.name}: a distinct character with a unique visual appearance`;
+  if (desc.length <= max) return `${c.name}: ${desc}`;
+  const cut = desc.slice(0, max);
+  const sp = cut.lastIndexOf(' ');
+  return `${c.name}: ${(sp > max / 2 ? cut.slice(0, sp) : cut)}...`;
+}
+
 export function StyleReferencePage() {
   const navigate = useNavigate();
   const { state, dispatch } = useWizard();
   const [artStyle, setArtStyle] = useState(state.story?.art_style || 'Modern Pixar 3D animation style');
+  const [storySetting, setStorySetting] = useState(state.story?.story_setting || '');
   const [isGeneratingRef, setIsGeneratingRef] = useState(false);
   // Initialize based on whether the story already has a reference image
   const [hasReference, setHasReference] = useState(
@@ -34,34 +58,65 @@ export function StyleReferencePage() {
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-  // Generate the reference prompt preview based on synopsis and characters
+  // Sync local form state when wizard state catches up (after WebSocket
+  // story updates land).
+  useEffect(() => {
+    if (state.story?.art_style && state.story.art_style !== artStyle) {
+      setArtStyle(state.story.art_style);
+    }
+    if (state.story?.story_setting !== undefined
+        && state.story.story_setting !== storySetting) {
+      setStorySetting(state.story.story_setting);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.story?.art_style, state.story?.story_setting]);
+
+  // Build a preview that mirrors the backend's _generate_reference_prompt
+  // exactly — so what the user sees is what the model is given.
   const generateReferencePromptPreview = (): string => {
     if (!state.story) return '';
-    
-    const synopsis = state.story.synopsis || '';
-    const synopsisContext = synopsis.substring(0, 200);
-    
-    let charDesc = '';
-    if (state.story.characters && state.story.characters.length > 0) {
-      const charList = state.story.characters
-        .map((c: any) => `${c.name}: ${c.description}`)
-        .join('. ');
-      const charNames = state.story.characters.map((c: any) => c.name).join(', ');
-      charDesc = `Characters in scene: ${charList}. All of them (${charNames}) present.`;
-    } else {
-      charDesc = `Characters: ${state.story.character_bible || ''}`;
+    const styleStr = (artStyle || 'modern 3D animation, cinematic lighting, high detail').replace(/\.$/, '');
+    const setting = trimSetting(storySetting, 160);
+    const chars = state.story.characters || [];
+
+    if (chars.length > 0) {
+      const names = chars.map(c => c.name).join(', ');
+      const charBlock = chars
+        .map(c => '- ' + compactCharAnchor(c, 260))
+        .join('\n');
+      const parts = [
+        'Character reference sheet. Lineup of every named character standing '
+          + 'side by side in a neutral T-pose against a plain off-white studio '
+          + 'background, full body visible head to toe, even soft lighting, '
+          + 'clear faces, no text, no labels, no props, no other characters.',
+        `Cast (${names}):\n${charBlock}`,
+        `Style: ${styleStr}, consistent character design, clean lines, vibrant colors, distinct silhouettes.`,
+      ];
+      if (setting) {
+        parts.push(
+          `Color and mood reference for the book (do NOT depict this scene here, this is a plain studio character sheet): ${setting}.`
+        );
+      }
+      return parts.join('\n\n');
     }
-    
-    const sceneContext = synopsisContext
-      ? `Opening scene from the story: ${synopsisContext} Show the characters positioned naturally as if starting the adventure, with natural poses and body language reflecting the story mood.`
-      : 'Show the characters positioned naturally together with natural poses and body language.';
-    
-    const prompt = 
-      `${artStyle}, establishing shot, ${sceneContext} ` +
-      `Full-body view of all characters together, clear faces and distinguishing features, ` +
-      `natural lighting, high quality illustration, no text, no labels. ${charDesc}`;
-    
-    return prompt;
+
+    let bible = (state.story.character_bible || '').trim();
+    if (bible.length > 800) {
+      const cut = bible.slice(0, 800);
+      const sp = cut.lastIndexOf(' ');
+      bible = (sp > 400 ? cut.slice(0, sp) : cut) + '...';
+    }
+    const parts = [
+      'Character reference sheet. All main characters standing side by side '
+        + 'against a plain off-white background, full body visible, even soft '
+        + 'lighting, no text, no labels.',
+      `Characters: ${bible}`,
+      `Style: ${styleStr}, clean lines, vibrant colors.`,
+    ];
+    if (setting) {
+      parts.push(`Color and mood reference for the book: ${setting}.`);
+    }
+    return parts.join('\n\n');
   };
 
   useEffect(() => {
@@ -116,6 +171,22 @@ export function StyleReferencePage() {
     }
   };
 
+  // Persist the world/setting anchor on blur. The local state mirrors what
+  // gets sent to the model, so the prompt preview updates as the user types.
+  const handleStorySettingBlur = async () => {
+    if (!state.jobId || !state.story) return;
+    dispatch({
+      type: 'UPDATE_STORY_FIELD',
+      payload: { field: 'story_setting', value: storySetting },
+    });
+    try {
+      await updateStorySetting(state.jobId, storySetting);
+    } catch (err) {
+      console.error('Failed to update story setting', err);
+      setError(err instanceof Error ? err.message : 'Failed to update world setting');
+    }
+  };
+
   const handleGenerateReference = async () => {
     if (!state.jobId) return;
     setIsGeneratingRef(true);
@@ -123,7 +194,10 @@ export function StyleReferencePage() {
     setRefProgress(null);
     setError(null);
     try {
+      // Flush any pending edits before kicking off generation so the
+      // reference is built from exactly what the user sees in the preview.
       await updateArtStyle(state.jobId, artStyle);
+      await updateStorySetting(state.jobId, storySetting);
       await generateMasterReference(state.jobId);
       // WebSocket onReferenceReady will update state
     } catch (err) {
@@ -172,17 +246,37 @@ export function StyleReferencePage() {
         <h2 className="text-xl text-gold mb-4">🎨 Style & Reference Image</h2>
 
         <div className="mb-4">
+          <div className="input-area">
+            <label>World / Setting</label>
+            <textarea
+              value={storySetting}
+              onChange={(e) => setStorySetting(e.target.value)}
+              onBlur={handleStorySettingBlur}
+              placeholder='One sentence — location, time of day, weather, mood, lighting. e.g. "a misty pine forest at twilight, soft moonlight, glowing fireflies"'
+              rows={3}
+              style={{ minHeight: '70px' }}
+            />
+          </div>
+          <div className="text-xs text-text-dim mt-1">
+            Injected into every panel prompt as a shared world anchor. Keep it
+            tight (one sentence) — it locks the visual world across all panels.
+          </div>
+        </div>
+
+        <div className="mb-4">
           <label className="text-sm font-semibold text-text-dim mb-2 block">Art Style</label>
           <ArtStyleSelector selectedStyle={artStyle} onSelect={handleStyleSelect} />
         </div>
 
         <div className="mb-6 p-4 bg-bg border border-border rounded-lg">
           <div className="text-sm font-semibold text-text-dim mb-3">Reference Prompt Preview</div>
-          <div className="text-sm text-text-secondary leading-relaxed bg-bg-darker p-3 rounded border border-border-dim max-h-32 overflow-y-auto font-mono text-xs">
+          <div className="text-sm text-text-secondary leading-relaxed bg-bg-darker p-3 rounded border border-border-dim max-h-56 overflow-y-auto font-mono text-xs whitespace-pre-wrap">
             {generateReferencePromptPreview()}
           </div>
           <div className="text-xs text-text-dim mt-2">
-            This prompt will be used to generate the opening establishing frame showing all characters in the story's opening scene.
+            Clean character-sheet prompt. The reference image is a neutral
+            lineup — its job is to anchor character look and color palette.
+            Composition for each panel comes from the panel's scene description.
           </div>
         </div>
 

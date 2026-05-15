@@ -69,6 +69,21 @@ export async function updateArtStyle(jobId: string, artStyle: string): Promise<v
   return handleResponse(response);
 }
 
+/**
+ * Update the shared world/setting anchor for a project. The setting is one
+ * sentence (location, time of day, weather, mood, lighting) and is injected
+ * into every panel prompt — editing it lets the user steer the visual world
+ * without rewriting per-panel scene descriptions.
+ */
+export async function updateStorySetting(jobId: string, storySetting: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/update-story-setting`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_id: jobId, story_setting: storySetting }),
+  });
+  return handleResponse(response);
+}
+
 export async function updateCharacters(jobId: string, characters: Character[]): Promise<void> {
   const response = await fetch(`${API_BASE}/update-characters`, {
     method: 'POST',
@@ -109,6 +124,7 @@ export async function getJobStatus(jobId: string): Promise<{
     title?: string;
     synopsis?: string;
     art_style?: string;
+    story_setting?: string;
     character_bible?: string;
     panels?: Panel[];
     characters?: Character[];
@@ -148,6 +164,7 @@ export async function loadProject(slug: string): Promise<{
     title?: string;
     synopsis?: string;
     art_style?: string;
+    story_setting?: string;
     character_bible?: string;
     panels?: Panel[];
     characters?: Character[];

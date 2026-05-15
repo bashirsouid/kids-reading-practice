@@ -58,17 +58,25 @@ def load_jobs():
             jdict["status"] = JobStatus(jdict["status"])
             job = ComicJob(**jdict)
             if story_dict:
+                from dataclasses import fields as _dc_fields
                 from generator import ComicStory, Panel, Character
+                panel_keys = {f.name for f in _dc_fields(Panel)}
+                char_keys = {f.name for f in _dc_fields(Character)}
+                story_keys = {f.name for f in _dc_fields(ComicStory)}
+
                 panels = []
                 for pdict in story_dict.get("panels", []):
-                    panels.append(Panel(**pdict))
+                    panels.append(Panel(**{k: v for k, v in pdict.items() if k in panel_keys}))
                 characters = []
                 for cdict in story_dict.get("characters", []):
-                    characters.append(Character(**cdict))
+                    characters.append(Character(**{k: v for k, v in cdict.items() if k in char_keys}))
 
                 story_dict["panels"] = panels
                 story_dict["characters"] = characters
-                job.story = ComicStory(**story_dict)
+                # Filter unknown keys so older saves (or future renames)
+                # don't blow up the loader.
+                story_kwargs = {k: v for k, v in story_dict.items() if k in story_keys}
+                job.story = ComicStory(**story_kwargs)
                 _load_job_images(job)
             if not job.slug:
                 from .utils import _make_project_slug

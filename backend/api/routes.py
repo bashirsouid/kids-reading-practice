@@ -19,6 +19,7 @@ from generator import (
     render_page,
     generate_master_reference,
     regenerate_panel,
+    panel_seed,
     _panel_gen_dims,
     _panel_prompt,
 )
@@ -28,7 +29,8 @@ from ..models import (
     JobStatus, ComicJob,
     GenerateRequest, RegeneratePanelRequest, UpdateCharactersRequest,
     UpdateCaptionRequest, UpdateTitleRequest, UpdateSynopsisRequest,
-    UpdateArtStyleRequest, GenerateSynopsisRequest, UpdatePanelRequest,
+    UpdateArtStyleRequest, UpdateStorySettingRequest,
+    GenerateSynopsisRequest, UpdatePanelRequest,
     UpdatePanelsRequest, UpdateCharacterRequest,
 )
 from .. import state as global_state
@@ -141,6 +143,8 @@ def _build_job_status_response(job):
             "title": job.story.title,
             "synopsis": job.story.synopsis,
             "art_style": job.story.art_style,
+            # New shared world-anchor; defaults to "" on older saved jobs.
+            "story_setting": getattr(job.story, "story_setting", ""),
             "character_bible": job.story.character_bible,
             "characters": [{"name": c.name, "description": c.description} for c in job.story.characters],
             "panels": [
@@ -310,6 +314,24 @@ async def api_update_art_style(req: UpdateArtStyleRequest):
 
     logger.info(f"Updating art style for job {req.job_id} to: {req.art_style}")
     job.story.art_style = req.art_style
+    save_jobs()
+    return {"status": "ok"}
+
+
+@router.post("/api/update-story-setting")
+async def api_update_story_setting(req: UpdateStorySettingRequest):
+    """Update the shared world/setting anchor for a job.
+
+    The story_setting is injected into every panel prompt as a world anchor
+    (location, time of day, mood, lighting). Editing it lets the user steer
+    the visual world without rewriting each panel's scene description.
+    """
+    job = global_state.jobs.get(req.job_id)
+    if not job or not job.story:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    logger.info(f"Updating story setting for job {req.job_id}")
+    job.story.story_setting = req.story_setting
     save_jobs()
     return {"status": "ok"}
 
@@ -525,6 +547,7 @@ async def _generate_panels_task(job):
                     width=gen_w,
                     height=gen_h,
                     reference_image=story.master_reference,
+                    seed=panel_seed(story, p.index),
                     step_callback=cb,
                 )
 

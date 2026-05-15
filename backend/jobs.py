@@ -14,6 +14,7 @@ from generator import (
     generate_all_panels,
     generate_master_reference,
     regenerate_panel,
+    panel_seed,
     _panel_gen_dims,
     _panel_prompt,
 )
@@ -299,6 +300,7 @@ async def process_job(job):
                     width=gen_w,
                     height=gen_h,
                     reference_image=story.master_reference,
+                    seed=panel_seed(story, p.index),
                 )
 
             await loop.run_in_executor(None, generate_single_panel)

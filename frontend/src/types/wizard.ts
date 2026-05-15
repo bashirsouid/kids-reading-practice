@@ -21,6 +21,12 @@ export interface Story {
   title?: string;
   synopsis?: string;
   art_style?: string;
+  /**
+   * One-sentence world anchor (location, time of day, weather, mood, lighting)
+   * shared across every panel. Backed by ComicStory.story_setting and edited
+   * via /api/update-story-setting.
+   */
+  story_setting?: string;
   character_bible?: string;
   master_reference?: string;
   reference_prompt?: string;

@@ -78,6 +78,11 @@ class UpdateArtStyleRequest(BaseModel):
     art_style: str
 
 
+class UpdateStorySettingRequest(BaseModel):
+    job_id: str
+    story_setting: str
+
+
 class GenerateSynopsisRequest(BaseModel):
     full_story: str
 
@@ -113,6 +118,7 @@ __all__ = [
     "UpdateTitleRequest",
     "UpdateSynopsisRequest",
     "UpdateArtStyleRequest",
+    "UpdateStorySettingRequest",
     "GenerateSynopsisRequest",
     "ProceedToNextStageRequest",
     "UpdatePanelRequest",

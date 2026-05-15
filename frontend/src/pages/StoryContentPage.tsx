@@ -23,6 +23,8 @@ interface WebSocketStory {
   title?: string;
   synopsis?: string;
   art_style?: string;
+  /** Shared world anchor injected into every panel prompt. */
+  story_setting?: string;
   character_bible?: string;
   characters?: Array<{ name: string; description: string }>;
   panels?: Array<{
@@ -81,6 +83,7 @@ export function StoryContentPage() {
           title: storyUpdate.title || 'Untitled',
           synopsis: storyUpdate.synopsis || '',
           art_style: storyUpdate.art_style || '',
+          story_setting: storyUpdate.story_setting || '',
           character_bible: storyUpdate.character_bible || '',
           characters: storyUpdate.characters || [],
           panels: convertedPanels,
