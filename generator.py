@@ -293,34 +293,45 @@ class TextGenerator:
                 return generated.strip().strip('"').strip("'")
 
 
+_BIBLE_FORMAT_INSTRUCTIONS = (
+    "CHARACTER_BIBLE: <use a bulleted list. ONE LINE per character. "
+    "Each line MUST start with \"- \" followed by the character's name, "
+    "then a colon, then a comma-separated description. The first colon on "
+    "the line is the boundary between the name and the description. "
+    "Format shown with placeholders (use the actual characters from your "
+    "story, not these placeholders):\n"
+    "  - FirstCharacterName: species, body shape, exact hair color and style, exact eye color, exact skin or fur tone, exact clothing with colors, accessories or markings, personality or posture\n"
+    "  - SecondCharacterName: species, body, hair, eyes, skin, clothing, accessories, personality\n\n"
+    "Rules:\n"
+    "- One character per line, starting with \"- \".\n"
+    "- The character name is whatever appears before the FIRST colon on the line.\n"
+    "- Do NOT put a dash in the name itself (compound words go in the description part).\n"
+    "- Always specify exact colors — never say \"colorful clothes\" or \"nice hair\".\n"
+    "- Include EVERY character that appears in any panel of the story, even minor ones.>"
+)
+
+
 def _build_story_prompt(synopsis: str) -> str:
     """Build the labeled plain-text prompt for a comic story.
 
-    The only new field vs the original prompt is STORY_SETTING — a single
-    sentence world anchor injected into every panel prompt. CHARACTER_BIBLE
-    is kept as a flowing paragraph: small LLMs (Qwen2.5-3B) follow this
-    format reliably, whereas earlier attempts to demand nested per-character
-    blocks led to empty parses and blank reference images.
+    The CHARACTER_BIBLE is requested as a bulleted per-line list — one
+    character per line, "- Name: description" — rather than a flowing
+    paragraph. Flowing paragraphs are hard to parse reliably because
+    descriptions naturally contain compound words ("palm-sized",
+    "pale-blue"), and the earlier parser's name/desc separator regex
+    treated those internal dashes as boundaries, producing nonsense
+    "character names" and FLUX-generating blank studio images.
     """
     return (
         "Write a 6-panel children's comic book story based on this synopsis:\n"
         '"' + synopsis + '"\n\n'
         "Use EXACTLY the following labeled plain-text format. Do not output JSON.\n"
-        "Do not output markdown. Do not add any commentary before or after.\n\n"
+        "Do not output markdown code fences. Do not add any commentary before or after.\n\n"
         "TITLE: <story title on one line>\n\n"
         "ART_STYLE: <one short sentence describing the visual style, e.g. \"modern 3D animation, cinematic lighting, high detail\">\n\n"
         "STORY_SETTING: <one short sentence describing the shared visual world: location, time of day, weather, lighting, and mood. Every panel happens inside this world. e.g. \"a misty pine forest at twilight, soft moonlight filtering through tall trees, glowing fireflies\">\n\n"
-        "CHARACTER_BIBLE: <one single paragraph describing EVERY character that appears in ANY panel of this story, including characters introduced in later panels. For EACH character provide ALL of the following details in a single flowing paragraph:\n"
-        "- Full name\n"
-        "- Species/type (human, cat, robot, dragon, etc.)\n"
-        "- Body shape and size (tall, short, chubby, slim, tiny, large, etc.)\n"
-        "- Exact HAIR COLOR and HAIR STYLE (e.g., \"long curly red hair\", \"short black buzzcut\", \"blue braided ponytail\")\n"
-        "- Exact EYE COLOR (e.g., \"big green eyes\", \"dark brown eyes\", \"golden amber eyes\")\n"
-        "- Exact SKIN TONE (e.g., \"fair pale skin\", \"medium brown skin\", \"dark brown skin\", \"warm olive skin\")\n"
-        "- Exact CLOTHING with specific COLORS and garment types (e.g., \"red hoodie with blue jeans and white sneakers\", \"purple wizard robe with gold stars and brown boots\")\n"
-        "- Any DISTINCTIVE MARKINGS or ACCESSORIES (e.g., \"a scar on left cheek\", \"round glasses\", \"a silver necklace\", \"freckles\", \"cat whiskers\", \"a magic wand\")\n"
-        "- Overall personality vibe or posture if relevant (e.g., \"always smiling\", \"shy and hunched\", \"confident stance with arms crossed\")\n\n"
-        "IMPORTANT: The CHARACTER_BIBLE must be a SINGLE paragraph (no bullet points, no line breaks within it) so it can be parsed reliably. Separate each character's description with a period and space. Make descriptions vivid and specific - NEVER say \"colorful clothes\" or \"nice hair\" without specifying exact colors and styles.>\n\n"
+        + _BIBLE_FORMAT_INSTRUCTIONS
+        + "\n\n"
         "PANEL 1\n"
         "CHARACTERS: <comma-separated list of character names appearing in this panel; use the same name spellings across all panels>\n"
         "SCENE: <vivid literal visual description of the panel. Say exactly what each character is DOING (use clear action verbs), where they are positioned, and what is visible in the foreground and background. Write it as an image-generation prompt — no narration voice, no \"meanwhile\", just what the camera sees.>\n"
@@ -336,32 +347,17 @@ def _build_story_prompt(synopsis: str) -> str:
 
 
 def _build_reference_profile_prompt(synopsis: str, title: str) -> str:
-    """Build metadata only for Step 3 reference generation (no panels yet).
-
-    Adds STORY_SETTING to the original flowing CHARACTER_BIBLE format. The
-    flowing paragraph is what Qwen2.5-3B reliably produces; the parser
-    extracts characters from it via _auto_detect_characters.
-    """
+    """Build metadata only for Step 3 reference generation (no panels yet)."""
     return (
         "Create character reference metadata for this children's comic book.\n\n"
         "TITLE: " + title + "\n\n"
         'SYNOPSIS: "' + synopsis + '"\n\n'
         "Use EXACTLY the following labeled plain-text format. Do not output JSON.\n"
-        "Do not output markdown. Do not add panels, scenes, captions, or commentary.\n\n"
+        "Do not output markdown code fences. Do not add panels, scenes, captions, or commentary.\n\n"
         "TITLE: <story title on one line>\n\n"
         "ART_STYLE: <one short sentence describing the visual style, e.g. \"modern 3D animation, cinematic lighting, high detail\">\n\n"
         "STORY_SETTING: <one short sentence describing the shared visual world: location, time of day, weather, lighting, and mood>\n\n"
-        "CHARACTER_BIBLE: <one single paragraph describing EVERY important character likely to appear in this story. For EACH character provide ALL of the following details in a single flowing paragraph:\n"
-        "- Full name\n"
-        "- Species/type (human, cat, robot, dragon, etc.)\n"
-        "- Body shape and size (tall, short, chubby, slim, tiny, large, etc.)\n"
-        "- Exact HAIR COLOR and HAIR STYLE (e.g., \"long curly red hair\", \"short black buzzcut\", \"blue braided ponytail\")\n"
-        "- Exact EYE COLOR (e.g., \"big green eyes\", \"dark brown eyes\", \"golden amber eyes\")\n"
-        "- Exact SKIN TONE (e.g., \"fair pale skin\", \"medium brown skin\", \"dark brown skin\", \"warm olive skin\")\n"
-        "- Exact CLOTHING with specific COLORS and garment types (e.g., \"red hoodie with blue jeans and white sneakers\", \"purple wizard robe with gold stars and brown boots\")\n"
-        "- Any DISTINCTIVE MARKINGS or ACCESSORIES (e.g., \"a scar on left cheek\", \"round glasses\", \"a silver necklace\", \"freckles\", \"cat whiskers\", \"a magic wand\")\n"
-        "- Overall personality vibe or posture if relevant\n\n"
-        "IMPORTANT: The CHARACTER_BIBLE must be a SINGLE paragraph (no bullet points, no line breaks within it). Separate each character's description with a period and space. Make descriptions vivid and specific - NEVER say \"colorful clothes\" or \"nice hair\" without specifying exact colors and styles. This is critical for generating a consistent reference image.>"
+        + _BIBLE_FORMAT_INSTRUCTIONS
     )
 
 
@@ -382,59 +378,101 @@ _HEADER_FIELD_RE = re.compile(
 )
 
 
+_GARBAGE_NAMES = {
+    'title', 'art_style', 'story_setting', 'character_bible',
+    'characters', 'character',
+    'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
+    'where', 'how', 'why', 'what', 'which', 'who', 'whom', 'whose',
+    'there', 'here', 'this', 'that', 'these', 'those',
+    'it', 'its', 'he', 'his', 'him', 'she', 'her', 'hers',
+    'they', 'them', 'their', 'theirs',
+    'we', 'us', 'our', 'ours', 'you', 'your', 'yours',
+    'i', 'me', 'my', 'mine',
+    'sure', 'okay', 'ok', 'here', "here's", 'note', 'notes',
+    'scene', 'setting', 'background', 'foreground', 'panel', 'landscape',
+    'one', 'two', 'three', 'four', 'five', 'six',
+    'the first', 'the second', 'the third', 'the fourth',
+    'the fifth', 'the sixth', 'the seventh',
+}
+
+
 def _auto_detect_characters(character_bible: str) -> list[Character]:
-    """Parse a list of characters from the LLM-generated character bible."""
+    """Extract characters from a CHARACTER_BIBLE produced by the LLM.
+
+    Supports two LLM output styles, in order of preference:
+
+    1. **Bulleted per-line list** (what the prompt asks for):
+
+           - Bramble: small fluffy brown rabbit, long droopy ears, ...
+           - Glow: palm-sized luminous moth, pale-blue wings, ...
+
+       Splits on the FIRST colon per line — never on a dash. The earlier
+       parser allowed `-` as a name/desc separator, so compound words in
+       descriptions (palm-sized, pale-blue, dark-brown) became name
+       boundaries and produced garbage character names.
+
+    2. **Flowing paragraph fallback** for older saved jobs or LLM
+       deviations:
+
+           "Bramble is a small brown rabbit. Glow is a moth."
+
+       The paragraph is split into sentences and each is matched against
+       a "Name is/was ..." pattern.
+    """
     if not character_bible:
         return []
 
-    characters = []
-    lines = [line.strip() for line in character_bible.split('\n') if line.strip()]
+    chars: list[Character] = []
+    seen: set[str] = set()
 
-    EXCLUDED_WORDS = {
-        'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
-        'where', 'how', 'why', 'what', 'which', 'who', 'whom', 'whose',
-        'there', 'this', 'that', 'these', 'those', 'it', 'its', 'he', 'his',
-        'him', 'she', 'her', 'hers', 'they', 'them', 'their', 'theirs',
-        'we', 'us', 'our', 'ours', 'you', 'your', 'yours', 'i', 'me', 'my', 'mine',
-        'mountain', 'forest', 'setting', 'background', 'scene', 'landscape'
-    }
+    # Format 1: bulleted per-line list.
+    for raw_line in character_bible.split('\n'):
+        # Strip leading bullet markers (-, *, 1., 1), etc.) plus whitespace.
+        line = re.sub(r'^[\-\*\d\.\)\s]+', '', raw_line).strip()
+        if ':' not in line:
+            continue
+        name, _, desc = line.partition(':')
+        # Strip markdown emphasis around the name (e.g. **Bramble**).
+        name = re.sub(r'[\*\_`]', '', name).strip()
+        desc = desc.strip()
+        if not name or not desc:
+            continue
+        if len(name) > 60 or len(desc) < 5:
+            continue
+        if name.lower() in _GARBAGE_NAMES:
+            continue
+        if name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        chars.append(Character(name=name, description=desc))
 
-    for line in lines:
-        list_match = re.match(r'^[\-\*\d\.]*\s*(?:\*\*)?([A-Z][^:]+?)(?:\*\*)?\s*[:\-]\s*(.+)$', line)
-        if list_match:
-            name = list_match.group(1).strip()
-            desc = list_match.group(2).strip()
-            name = re.sub(r'[\*\:]', '', name).strip()
-            if name.lower() not in EXCLUDED_WORDS and len(name) >= 2:
-                characters.append(Character(name=name, description=desc))
-                continue
+    if chars:
+        return chars
 
-        segments = re.split(r'(?<=[.!?])\s+(?=[A-Z])', line)
-        for segment in segments:
-            segment = segment.strip()
-            if not segment: continue
-            m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:is|was)\s+(?:a|an|the)?\s*(.+)$', segment, re.IGNORECASE)
-            if m:
-                name = m.group(1).strip()
-                desc = m.group(2).strip()
-                if name.lower() not in EXCLUDED_WORDS and len(name) >= 2:
-                    characters.append(Character(name=name, description=desc))
-            else:
-                words = segment.split()
-                if words and words[0][0].isupper() and len(words) > 1:
-                    name = words[0].strip('.,:;()')
-                    name_lower = name.lower()
-                    if name_lower not in EXCLUDED_WORDS and len(name) >= 3:
-                        desc = ' '.join(words[1:])[:150]
-                        characters.append(Character(name=name, description=desc))
+    # Format 2: flowing paragraph. Split on sentence boundaries and try
+    # to match each sentence against "Name is/was ...".
+    SENTENCE_NAME_RE = re.compile(
+        r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:is|was)\s+(?:a|an|the)?\s*(.+)$'
+    )
+    for sentence in re.split(r'[.!?\n]+', character_bible):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        m = SENTENCE_NAME_RE.match(sentence)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        desc = m.group(2).strip()
+        if name.lower() in _GARBAGE_NAMES:
+            continue
+        if name.lower() in seen:
+            continue
+        if len(name) < 2 or len(desc) < 5:
+            continue
+        seen.add(name.lower())
+        chars.append(Character(name=name, description=desc))
 
-    seen = set()
-    unique_chars = []
-    for c in characters:
-        if c.name.lower() not in seen:
-            seen.add(c.name.lower())
-            unique_chars.append(c)
-    return unique_chars
+    return chars
 
 
 def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
@@ -500,6 +538,10 @@ def _parse_story_text(raw: str, synopsis: str) -> ComicStory:
 
     character_bible = headers.get("CHARACTER_BIBLE", "")
     characters = _auto_detect_characters(character_bible)
+    if characters:
+        logger.info("Story parse: extracted " + str(len(characters)) + " character(s): " + ", ".join(c.name for c in characters))
+    else:
+        logger.warning("Story parse: extracted 0 characters. CHARACTER_BIBLE first 400 chars: " + (character_bible[:400] or "<empty>").replace("\n", "\\n"))
 
     return ComicStory(
         title=headers.get("TITLE", "Untitled").strip() or "Untitled",
@@ -531,10 +573,13 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
         # fresh sample. After max_retries it bubbles up — better to fail
         # loudly here than to silently feed FLUX an empty character list and
         # produce a blank reference image.
+        logger.warning("Reference profile parse: LLM produced no CHARACTER_BIBLE. Raw first 400 chars: " + text[:400].replace("\n", "\\n"))
         raise ValueError("LLM did not produce a CHARACTER_BIBLE")
     characters = _auto_detect_characters(character_bible)
     if not characters:
+        logger.warning("Reference profile parse: extracted 0 characters from CHARACTER_BIBLE. Bible first 400 chars: " + character_bible[:400].replace("\n", "\\n"))
         raise ValueError("Could not extract any characters from CHARACTER_BIBLE")
+    logger.info("Reference profile parse: extracted " + str(len(characters)) + " character(s): " + ", ".join(c.name for c in characters))
 
     return ComicStory(
         title=headers.get("TITLE", fallback_title).strip() or fallback_title,
@@ -1141,8 +1186,14 @@ def generate_master_reference(
 
     prompt = _generate_reference_prompt(story)
 
-    logger.info("Generating master reference image (character sheet)...")
-    logger.debug("Reference prompt (first 200 chars): " + prompt[:200])
+    logger.info(
+        "Generating master reference image (character sheet) for "
+        + str(len(story.characters)) + " character(s): "
+        + (", ".join(c.name for c in story.characters) or "<none, using bible>")
+    )
+    # Full prompt at INFO so we can diagnose blank/garbage reference issues
+    # without enabling debug logging.
+    logger.info("Reference prompt:\n" + prompt)
     img = img_gen.generate(
         prompt=prompt,
         width=gen_w,

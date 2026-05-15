@@ -399,6 +399,12 @@ async def api_generate_panel_breakdown(job_id: str):
             story.title = previous_story.title
         if previous_story.art_style:
             story.art_style = previous_story.art_style
+        # Preserve the world anchor from Step 3 — user may have edited it
+        # there, and we don't want generate_story's fresh sample to clobber
+        # their edit. getattr keeps us safe loading older saved jobs.
+        prev_setting = getattr(previous_story, "story_setting", "")
+        if prev_setting:
+            story.story_setting = prev_setting
         if previous_story.character_bible:
             story.character_bible = previous_story.character_bible
         if previous_story.characters:
