@@ -218,10 +218,22 @@ onStoryUpdate: (storyUpdate) => {
     }
   }, [state.jobId, handleImageGenerating, panels]);
 
-  const handleUpdatePanel = useCallback((index: number, field: string, value: string) => {
+const handleUpdatePanel = useCallback((index: number, field: string, value: string) => {
     if (!state.story?.panels) return;
     const newPanels = [...state.story.panels];
-    newPanels[index] = { ...newPanels[index], [field]: value };
+    // Clear is_placeholder flag when user edits a previously-placeholder panel
+    // A panel is no longer a placeholder if both caption and image_prompt are non-empty
+    const newCaption = field === 'caption' ? value : newPanels[index].caption;
+    const newImagePrompt = field === 'image_prompt' ? value : newPanels[index].image_prompt;
+    const stillPlaceholder = (
+      !newCaption || newCaption.startsWith('[Placeholder') ||
+      !newImagePrompt || newImagePrompt.startsWith('[Placeholder')
+    );
+    newPanels[index] = { 
+      ...newPanels[index], 
+      [field]: value,
+      is_placeholder: stillPlaceholder,
+    };
     dispatch({
       type: 'SET_STORY',
       payload: { ...state.story, panels: newPanels },

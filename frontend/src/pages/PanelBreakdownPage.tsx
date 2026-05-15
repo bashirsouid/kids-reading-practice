@@ -74,7 +74,19 @@ export function PanelBreakdownPage() {
 
   const handlePanelUpdate = (idx: number, field: string, value: string) => {
     const newPanels = [...panels];
-    newPanels[idx] = { ...newPanels[idx], [field]: value };
+    // Clear is_placeholder flag when user edits a previously-placeholder panel
+    // A panel is no longer a placeholder if both caption and image_prompt are non-empty
+    const newCaption = field === 'caption' ? value : newPanels[idx].caption;
+    const newImagePrompt = field === 'image_prompt' ? value : newPanels[idx].image_prompt;
+    const stillPlaceholder = (
+      !newCaption || newCaption.startsWith('[Placeholder') ||
+      !newImagePrompt || newImagePrompt.startsWith('[Placeholder')
+    );
+    newPanels[idx] = { 
+      ...newPanels[idx], 
+      [field]: value,
+      is_placeholder: stillPlaceholder,
+    };
     setPanels(newPanels);
   };
 
