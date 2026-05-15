@@ -118,7 +118,16 @@ export async function getJobStatus(jobId: string): Promise<{
   return handleResponse(response);
 }
 
-export async function updatePanels(jobId: string, panels: unknown[]): Promise<void> {
+export async function regeneratePanel(jobId: string, panelIndex: number, modification?: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/regenerate-panel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_id: jobId, panel_index: panelIndex, modification: modification || '' }),
+  });
+  return handleResponse(response);
+}
+
+ export async function updatePanels(jobId: string, panels: unknown[]): Promise<void> {
   const response = await fetch(`${API_BASE}/update-panels`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

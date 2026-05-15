@@ -1,19 +1,19 @@
 /**
  * PanelImagesPage - Step 5: Generate images for each panel.
- * 
+ *
  * Purpose: Generate images for all 6 panels using the art style and descriptions.
  * Displays panel preview grid and progress indicator during generation.
  * Shows per-panel step-level progress via WebSocket.
  * Proceeding advances job to "complete" stage.
- * 
+ *
  * Route: /panelImages
- * 
+ *
  * Note: This step generates the actual panel images. Next should only proceed after images ready.
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generatePanels, getJobStatus, getPanelImageUrl } from '../services/api';
+import { proceedToNextStage, generatePanels, regeneratePanel, getJobStatus, getPanelImageUrl } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { Button } from '../components/ui/Button';
 import { ProgressBar } from '../components/ui/ProgressBar';
@@ -21,6 +21,7 @@ import { PanelGrid } from '../components/panel/PanelGrid';
 import { ErrorMessage } from '../components/ui/ErrorMessage';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { ImageLightbox } from '../components/ui/ImageLightbox';
+import { PanelModal } from '../components/panel/PanelModal';
 import type { PanelGenerationProgress } from '../components/panel/PanelCard';
 
 export function PanelImagesPage() {
@@ -31,6 +32,7 @@ export function PanelImagesPage() {
   const [error, setError] = useState<string | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
+  const [modalPanelIndex, setModalPanelIndex] = useState<number | null>(null);
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
   /** Per-panel generation state: maps panel index to progress or true (started, no steps yet). */
@@ -170,7 +172,7 @@ export function PanelImagesPage() {
     setIsGenerating(true);
     setProgress({ current: 0, total: panels.filter(p => !p.is_placeholder && !p.has_image).length || 6 });
     setError(null);
-    
+
     // Trigger panel generation using the dedicated endpoint
     try {
       await generatePanels(state.jobId);
@@ -183,12 +185,46 @@ export function PanelImagesPage() {
   };
 
   const panels = state.story?.panels || [];
+
+  const handlePanelClick = (idx: number) => {
+    const panel = panels[idx];
+    if (panel?.has_image && state.jobId) {
+      setModalPanelIndex(idx);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setModalPanelIndex(null);
+  };
+
+  const handleRegeneratePanel = useCallback(async (panelIndex: number) => {
+    if (!state.jobId) return;
+    handleImageGenerating('panel', panelIndex);
+    try {
+      await regeneratePanel(state.jobId, panelIndex, panels[panelIndex]?.image_prompt);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to regenerate panel';
+      setError(errorMessage);
+      setIsGenerating(false);
+    }
+  }, [state.jobId, handleImageGenerating, panels]);
+
+  const handleUpdatePanel = useCallback((index: number, field: string, value: string) => {
+    if (!state.story?.panels) return;
+    const newPanels = [...state.story.panels];
+    newPanels[index] = { ...newPanels[index], [field]: value };
+    dispatch({
+      type: 'SET_STORY',
+      payload: { ...state.story, panels: newPanels },
+    });
+  }, [state.story, dispatch]);
+
   // Check for panels without images (missing = no image generated)
   const panelsWithoutImages = panels.filter(p => !p.is_placeholder && !p.has_image).length;
-  const hasPlaceholders = panels.some(p => 
+  const hasPlaceholders = panels.some(p =>
     p.is_placeholder || (p.caption && p.caption.startsWith('[Placeholder'))
   );
-  
+
   // User can proceed to Review only when ALL 6 panels have images generated
   // and there are no placeholders that need editing
   const allPanelsHaveImages = panels.length === 6 && panelsWithoutImages === 0 && !hasPlaceholders;
@@ -208,6 +244,8 @@ export function PanelImagesPage() {
   const handleBack = () => {
     navigate(projectPath('panelBreakdown'));
   };
+
+  const activeModalPanel = modalPanelIndex !== null ? panels[modalPanelIndex] : null;
 
   return (
     <div className="main-layout">
@@ -286,17 +324,26 @@ export function PanelImagesPage() {
             panels={panels}
             jobId={state.jobId}
             generatingPanels={generatingPanels}
-            onPanelClick={(idx) => {
-              const panel = panels[idx];
-              if (panel?.has_image && state.jobId) {
-                setLightboxUrl(getPanelImageUrl(state.jobId, idx));
-              }
-            }}
+            onPanelClick={handlePanelClick}
+            onRegenerate={handleRegeneratePanel}
           />
         )}
       </div>
+
       {lightboxUrl && (
         <ImageLightbox src={lightboxUrl} onClose={() => setLightboxUrl(null)} />
+      )}
+
+      {activeModalPanel && modalPanelIndex !== null && state.jobId && (
+        <PanelModal
+          isOpen={true}
+          onClose={handleCloseModal}
+          panel={activeModalPanel}
+          panelIndex={modalPanelIndex}
+          jobId={state.jobId}
+          onRegenerate={handleRegeneratePanel}
+          onUpdatePanel={handleUpdatePanel}
+        />
       )}
     </div>
   );

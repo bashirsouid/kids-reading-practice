@@ -294,3 +294,73 @@ h1, h2, h3, .comic-title {
   0%, 100% { opacity: 0.6; }
   50% { opacity: 1; }
 }
+
+/* ── Regenerate Icon Button ──────────────────────────────────────────── */
+.regen-icon-btn {
+  animation: regenPulse 2s ease-in-out infinite;
+}
+
+.regen-icon-btn:hover {
+  transform: scale(1.15);
+}
+
+@keyframes regenPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(59, 130, 246, 0); }
+}
+
+/* ── Panel Modal ─────────────────────────────────────────────────────── */
+.panel-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: modalFadeIn 0.2s ease-out;
+}
+
+@keyframes modalFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.panel-modal-content {
+  background: var(--surface);
+  border: 1px solid var(--glass);
+  border-radius: var(--radius);
+  width: 95vw;
+  max-width: 900px;
+  max-height: 95vh;
+  overflow-y: auto;
+  animation: modalSlideIn 0.2s ease-out;
+}
+
+@keyframes modalSlideIn {
+  from { opacity: 0; transform: translateY(20px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.panel-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.panel-modal-close:hover {
+  background: rgba(233, 69, 96, 0.3);
+  border-color: var(--accent);
+}

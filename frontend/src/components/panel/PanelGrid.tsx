@@ -15,11 +15,12 @@ interface PanelGridProps {
   panels: Panel[];
   jobId?: string | null;
   onPanelClick?: (index: number) => void;
+  onRegenerate?: (index: number) => void;
   /** Map of panel index → generation progress (or true if generating without step data yet). */
   generatingPanels?: Record<number, PanelGenerationProgress | true>;
 }
 
-export function PanelGrid({ panels, jobId, onPanelClick, generatingPanels }: PanelGridProps) {
+export function PanelGrid({ panels, jobId, onPanelClick, onRegenerate, generatingPanels }: PanelGridProps) {
   return (
     <div className="panel-grid grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5 mb-4">
       {panels.map((panel, idx) => {
@@ -35,6 +36,7 @@ export function PanelGrid({ panels, jobId, onPanelClick, generatingPanels }: Pan
             index={idx}
             jobId={jobId}
             onClick={() => onPanelClick?.(idx)}
+            onRegenerate={onRegenerate}
             isGenerating={isGenerating}
             generationProgress={progress}
           />
