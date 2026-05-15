@@ -42,22 +42,25 @@ export function PanelImagesPage() {
     dispatch({ type: 'SET_PAGE', payload: 'panelImages' });
   }, []);
 
-  const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
-    if (target === 'panel' && panelIndex !== null) {
-      // Blank out the old panel image and show generating overlay
-      setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
-      // Mark the panel as not having an image in the story state
-      if (state.story?.panels) {
-        const updatedPanels = state.story.panels.map((p, i) =>
-          i === panelIndex ? { ...p, has_image: false } : p
-        );
-        dispatch({
-          type: 'SET_STORY',
-          payload: { ...state.story, panels: updatedPanels },
-        });
-      }
-    }
-  }, [state.story, dispatch]);
+const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
+     if (target === 'panel' && panelIndex !== null) {
+       // Blank out the old panel image and show generating overlay
+       setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
+       // Mark the panel as not having an image in the story state
+       if (state.story?.panels) {
+         const updatedPanels = state.story.panels.map((p, i) =>
+           i === panelIndex ? { ...p, has_image: false } : p
+         );
+         dispatch({
+           type: 'SET_STORY',
+           payload: { ...state.story, panels: updatedPanels },
+         });
+       }
+       // A panel is being regenerated, so we are no longer complete
+       setIsGenerating(true);
+       setIsComplete(false);
+     }
+   }, [state.story, dispatch]);
 
   const handleImageProgress = useCallback((target: 'reference' | 'panel', panelIndex: number | null, step: number, totalSteps: number) => {
     if (target === 'panel' && panelIndex !== null) {
@@ -71,34 +74,40 @@ export function PanelImagesPage() {
   // Listen for WebSocket updates for panel generation progress
   useWebSocket({
     jobId: state.jobId || '',
-    onProgress: (current, total) => {
-      setProgress({ current, total });
-      if (total > 0 && current < total) {
-        setIsGenerating(true);
-      }
-    },
-    onStoryUpdate: (storyUpdate) => {
-      if (!storyUpdate) return;
-      dispatch({
-        type: 'SET_STORY',
-        payload: {
-          ...(state.story || {}),
-          ...storyUpdate,
-        },
-      });
-      // Clear generating state for panels that now have images
-      if (storyUpdate.panels) {
-        setGeneratingPanels(prev => {
-          const next = { ...prev };
-          for (const p of storyUpdate.panels!) {
-            if (p.has_image && next[p.index] !== undefined) {
-              delete next[p.index];
-            }
-          }
-          return next;
-        });
-      }
-    },
+onProgress: (current, total) => {
+       setProgress({ current, total });
+       if (total > 0 && current < total) {
+         setIsGenerating(true);
+       }
+     },
+onStoryUpdate: (storyUpdate) => {
+       if (!storyUpdate) return;
+       dispatch({
+         type: 'SET_STORY',
+         payload: {
+           ...(state.story || {}),
+           ...storyUpdate,
+         },
+       });
+       // Clear generating state for panels that now have images
+       if (storyUpdate.panels) {
+         setGeneratingPanels(prev => {
+           const next = { ...prev };
+           for (const p of storyUpdate.panels!) {
+             if (p.has_image && next[p.index] !== undefined) {
+               delete next[p.index];
+             }
+           }
+           return next;
+         });
+         // If all panels now have images, mark complete so the "ready" message shows
+         const allHaveImages = storyUpdate.panels!.every(p => p.has_image);
+         if (allHaveImages) {
+           setIsGenerating(false);
+           setIsComplete(true);
+         }
+       }
+     },
     onStageChange: (stage) => {
       if (stage === 'complete') {
         setIsGenerating(false);
