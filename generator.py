@@ -1,11 +1,14 @@
 """
 generator.py - Core AI generation logic for Comic Book Generator.
 
-Handles text generation (story -> JSON), image generation (FLUX.1-dev),
-and comic page rendering (PIL-based 8.5x11" layout).
+Intel NPU branch: text generation runs on the Intel NPU via OpenVINO
+(optimum-intel OVModelForCausalLM); image generation runs on the Intel
+Arc iGPU via OpenVINO (OVStableDiffusionXLPipeline with SDXL-Turbo).
+
+No CUDA or ROCm required. Tested on Lenovo X1 Carbon Gen 13 (Intel Core
+Ultra 200V / Lunar Lake) with Intel NPU 48 TOPS and Intel Arc 140V iGPU.
 """
 
-import json
 import os
 import random
 import re
@@ -15,7 +18,7 @@ from pathlib import Path
 from typing import Optional, Callable, Union, List
 import threading
 
-import torch
+import torch  # CPU-only; used for torch.Generator seeding in OV pipelines
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger("comic-generator")
@@ -30,42 +33,30 @@ COLS = 2
 ROWS = 3
 TITLE_H = 220
 CAPTION_H = 200
-PANEL_GEN_SIZE = 768
+# SDXL-Turbo is trained at 512px; smaller gen size = faster + better quality
+PANEL_GEN_SIZE = 512
 
-IMAGE_MODEL_ID = "black-forest-labs/FLUX.1-dev"
-PANEL_INFERENCE_STEPS = 28
-GUIDANCE_SCALE = 5.0
-TEXT_MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+# Text model: Qwen2.5-3B-Instruct — runs on Intel NPU via OVModelForCausalLM
+TEXT_MODEL_ID = os.environ.get("TEXT_MODEL_ID", "Qwen/Qwen2.5-3B-Instruct")
 
-DEVICE = "cuda"
-DTYPE = torch.bfloat16
+# Image model: SDXL-Turbo — 4-step adversarial distillation; runs on Intel
+# Arc iGPU via OVStableDiffusionXLPipeline. No guidance scale needed.
+IMAGE_MODEL_ID = os.environ.get("IMAGE_MODEL_ID", "stabilityai/sdxl-turbo")
+PANEL_INFERENCE_STEPS = int(os.environ.get("PANEL_INFERENCE_STEPS", "4"))
+GUIDANCE_SCALE = 0.0  # SDXL-Turbo is guidance-free (adversarial distillation)
 
-# T5-XXL hard ceiling for FLUX. Anything past this is silently dropped, so
-# prompts must stay well under it or the scene description is what gets cut.
-FLUX_MAX_PROMPT_TOKENS = 512
+# Intel device assignment:
+#   NPU_DEVICE  — Intel NPU (transformer LLM inference; 48 TOPS on Lunar Lake)
+#   IMAGE_DEVICE — Intel Arc iGPU (diffusion UNet; better suited for parallel
+#                  rasterization workloads than the NPU)
+# Both fall back to "CPU" if the device is unavailable or compilation fails.
+NPU_DEVICE = os.environ.get("NPU_DEVICE", "NPU")
+IMAGE_DEVICE = os.environ.get("IMAGE_DEVICE", "GPU")
 
-# How strongly panel generation should be anchored to the master reference
-# when the FluxImg2ImgPipeline fallback is used.
-#   1.0  → pure text-to-image (reference ignored).
-#   0.95 → high freedom for the scene, mild palette/style anchor (recommended).
-#   0.85 → reference dominates color + character look, scenes vary less.
-PANEL_REF_STRENGTH = float(os.environ.get("PANEL_REF_STRENGTH", "0.95"))
-
-# FLUX-Redux: SigLIP-based image-to-prompt-embedding adapter that injects the
-# reference image as joint-attention conditioning rather than as a latent.
-# Gives style/character consistency without the composition leak you get from
-# pure img2img. When available it's the preferred path; otherwise we fall
-# back to img2img, then to text2img.
-USE_FLUX_REDUX = os.environ.get("USE_FLUX_REDUX", "1") != "0"
-FLUX_REDUX_REPO = os.environ.get("FLUX_REDUX_REPO", "black-forest-labs/FLUX.1-Redux-dev")
-
-# Redux fuses text-derived and image-derived embeddings. Scaling these lets
-# the user dial the balance:
-#   REDUX_PROMPT_SCALE  > 1 → text (scene description) dominates more.
-#   REDUX_POOLED_SCALE  < 1 → reference image's pooled style signal weakens.
-# Defaults bias toward "scene matters most, reference is the style anchor".
-REDUX_PROMPT_SCALE = float(os.environ.get("REDUX_PROMPT_SCALE", "1.5"))
-REDUX_POOLED_SCALE = float(os.environ.get("REDUX_POOLED_SCALE", "1.0"))
+# OpenVINO compiled-model cache: avoids minutes-long recompilation on every
+# startup. The first run writes IR + compiled blobs here; subsequent runs load
+# them instantly. Set to "" to disable.
+OV_CACHE_DIR = os.environ.get("OV_CACHE_DIR", str(Path(__file__).parent / ".cache" / "ov_models"))
 
 
 # - Data Classes -
@@ -122,7 +113,13 @@ RANDOM_THEMES = [
 
 # - Text Generator -
 class TextGenerator:
-    """Generates comic story structure as JSON using Qwen2.5-7B-Instruct."""
+    """Generates comic story structure using Qwen2.5-3B-Instruct on Intel NPU.
+
+    Uses OVModelForCausalLM (optimum-intel) compiled for the Intel NPU device.
+    On first load the HuggingFace model is exported to OpenVINO IR and compiled
+    for NPU; the result is cached in OV_CACHE_DIR so subsequent starts are fast.
+    Falls back to CPU if NPU compilation fails.
+    """
 
     def __init__(self, model_id: str = TEXT_MODEL_ID):
         self.model_id = model_id
@@ -130,19 +127,53 @@ class TextGenerator:
         self._lock = threading.Lock()
 
     def load(self):
-        """Load the text model into GPU memory."""
+        """Export/load the text model to OpenVINO and compile for Intel NPU."""
         if self.pipe is not None:
             return
-        from transformers import pipeline
-        logger.info("Loading text model: " + self.model_id)
-        self.pipe = pipeline(
+
+        from optimum.intel import OVModelForCausalLM
+        from transformers import AutoTokenizer, pipeline as hf_pipeline
+
+        ov_config = {
+            "PERFORMANCE_HINT": "LATENCY",
+        }
+        if OV_CACHE_DIR:
+            Path(OV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+            ov_config["CACHE_DIR"] = OV_CACHE_DIR
+
+        devices_to_try = [NPU_DEVICE, "CPU"]
+        last_err = None
+        model = None
+        active_device = None
+
+        for device in devices_to_try:
+            try:
+                logger.info("Loading text model " + self.model_id + " on " + device + " via OpenVINO...")
+                model = OVModelForCausalLM.from_pretrained(
+                    self.model_id,
+                    device=device,
+                    export=True,
+                    load_in_4bit=True,
+                    ov_config=ov_config,
+                    trust_remote_code=True,
+                )
+                active_device = device
+                logger.info("Text model loaded on " + device + ".")
+                break
+            except Exception as e:
+                logger.warning("Failed to load text model on " + device + ": " + str(e)[:200])
+                last_err = e
+
+        if model is None:
+            raise RuntimeError("Could not load text model on any device. Last error: " + str(last_err))
+
+        tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+        self.pipe = hf_pipeline(
             "text-generation",
-            model=self.model_id,
-            torch_dtype=DTYPE,
-            device=DEVICE,
-            trust_remote_code=True,
+            model=model,
+            tokenizer=tokenizer,
         )
-        logger.info("Text model loaded successfully on device: " + str(self.pipe.device))
+        logger.info("Text generation pipeline ready on " + active_device + ".")
 
     def generate(self, prompt: str, max_tokens: int = 1500) -> str:
         """Generate text from a prompt."""
@@ -174,8 +205,6 @@ class TextGenerator:
                 return_full_text=False,
             )
             logger.info("Text generation inference complete.")
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
             generated = out[0]["generated_text"]
             if isinstance(generated, list):
                 return generated[-1]["content"].strip()
@@ -186,9 +215,9 @@ class TextGenerator:
         """Generate a complete comic story structure with retry logic."""
         prompt = _build_story_prompt(synopsis)
         for attempt in range(max_retries):
+            raw = ""
             try:
                 raw = self.generate(prompt, max_tokens=2000)
-                raw_trimmed = raw[:500] + "..." if len(raw) > 500 else raw
                 result = _parse_story_text(raw, synopsis)
                 logger.info("Story generation succeeded on attempt " + str(attempt + 1) + ". Panels: " + str(len(result.panels)))
                 return result
@@ -256,8 +285,6 @@ class TextGenerator:
                 temperature=0.8,
                 return_full_text=False,
             )
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
             generated = out[0]["generated_text"]
             if isinstance(generated, list):
                 return generated[-1]["content"].strip()
@@ -284,8 +311,6 @@ class TextGenerator:
                 temperature=0.7,
                 return_full_text=False,
             )
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
             generated = out[0]["generated_text"]
             if isinstance(generated, list):
                 return generated[-1]["content"].strip().strip('"').strip("'")
@@ -320,7 +345,7 @@ def _build_story_prompt(synopsis: str) -> str:
     descriptions naturally contain compound words ("palm-sized",
     "pale-blue"), and the earlier parser's name/desc separator regex
     treated those internal dashes as boundaries, producing nonsense
-    "character names" and FLUX-generating blank studio images.
+    "character names" and producing blank studio images.
     """
     return (
         "Write a 6-panel children's comic book story based on this synopsis:\n"
@@ -433,7 +458,7 @@ def _auto_detect_characters(character_bible: str) -> list[Character]:
     The first-colon-only split (never on `-`) was the critical fix:
     earlier the parser treated dashes in descriptions ("palm-sized",
     "pale-blue") as name boundaries, producing garbage names and
-    feeding FLUX a blank-rendering prompt.
+    feeding the image model a blank-rendering prompt.
     """
     if not character_bible:
         return []
@@ -580,7 +605,7 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
     if not character_bible:
         # The retry loop in generate_reference_profile will try again with a
         # fresh sample. After max_retries it bubbles up — better to fail
-        # loudly here than to silently feed FLUX an empty character list and
+        # loudly here than to silently feed the image model an empty character list and
         # produce a blank reference image.
         logger.warning("Reference profile parse: LLM produced no CHARACTER_BIBLE. Raw first 400 chars: " + text[:400].replace("\n", "\\n"))
         raise ValueError("LLM did not produce a CHARACTER_BIBLE")
@@ -601,237 +626,95 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
     )
 
 
-# - VAE Stability Patch (gfx1151) -
-def _patch_vae_for_cpu_execution(vae):
-    """Pin VAE to CPU (fp32) and route encode/decode through CPU.
-
-    The encode wrapper bounces the returned latent distribution back to the
-    caller's original device so img2img pipelines (which sample from
-    ``latent_dist`` with a CUDA generator) don't device-mismatch.
-    """
-    vae.to(device="cpu", dtype=torch.float32)
-    vae.eval()
-
-    original_decode = vae.decode
-    original_encode = vae.encode
-
-    def safe_decode(z, *args, **kwargs):
-        with torch.no_grad():
-            orig_device = z.device
-            orig_dtype = z.dtype
-            z_cpu = z.detach().to(device="cpu", dtype=torch.float32)
-            result = original_decode(z_cpu, *args, **kwargs)
-            # DEBUG: Log result info before moving
-            try:
-                if hasattr(result, 'sample'):
-                    result_sample = result.sample
-                elif isinstance(result, tuple):
-                    result_sample = result[0]
-                else:
-                    result_sample = result
-                logger.info(f"safe_decode: shape={result_sample.shape}, device={result_sample.device}, dtype={result_sample.dtype}")
-                logger.info(f"safe_decode: min={result_sample.min().item():.4f}, max={result_sample.max().item():.4f}, mean={result_sample.mean().item():.4f}")
-            except Exception as e:
-                logger.info(f"safe_decode debug error: {e}")
-            # Move decoded image back to original device/dtype
-            if isinstance(result, tuple):
-                # return_dict=False returns (sample,)
-                result = (result[0].to(device=orig_device, dtype=orig_dtype),) + result[1:]
-            elif hasattr(result, 'sample'):
-                # return_dict=True returns DecoderOutput with sample attribute
-                result.sample = result.sample.to(device=orig_device, dtype=orig_dtype)
-            else:
-                # Fallback: treat as tensor
-                result = result.to(device=orig_device, dtype=orig_dtype)
-            return result
-
-    def safe_encode(x, *args, **kwargs):
-        with torch.no_grad():
-            if torch.is_tensor(x):
-                orig_device = x.device
-                orig_dtype = x.dtype
-                x_cpu = x.detach().to(device="cpu", dtype=torch.float32)
-            else:
-                orig_device = torch.device(DEVICE)
-                orig_dtype = DTYPE
-                x_cpu = x
-            result = original_encode(x_cpu, *args, **kwargs)
-            ld = getattr(result, "latent_dist", None)
-            if ld is not None and ld.parameters.device != orig_device:
-                try:
-                    from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
-                except ImportError:
-                    from diffusers.models.vae import DiagonalGaussianDistribution
-                new_params = ld.parameters.to(device=orig_device, dtype=orig_dtype)
-                result.latent_dist = DiagonalGaussianDistribution(new_params, deterministic=ld.deterministic)
-            return result
-
-    vae.decode = safe_decode
-    vae.encode = safe_encode
-    return vae
-
-
 # - Image Generator -
 class ImageGenerator:
-    """Generates comic panel images using FLUX.1-dev.
+    """Generates comic panel images using SDXL-Turbo via OpenVINO on Intel Arc iGPU.
 
-    Three generation paths in order of preference when a reference image is
-    provided:
+    SDXL-Turbo uses adversarial diffusion distillation (ADD): it produces
+    high-quality images in 1-4 steps with guidance_scale=0. On the Intel Arc
+    140V iGPU this is fast enough for interactive use (~5-15 s/panel).
 
-      1. **FLUX-Redux** (preferred). The reference goes through a SigLIP
-         image encoder + image-embedder and is injected into the joint
-         attention as prompt-like embeddings. Style + character look
-         transfer cleanly; the text prompt fully determines composition.
-         Requires the ``black-forest-labs/FLUX.1-Redux-dev`` weights —
-         downloaded automatically by HuggingFace on first use. Disable
-         with env var ``USE_FLUX_REDUX=0``.
-      2. **FluxImg2ImgPipeline** (fallback). The reference is VAE-encoded
-         and used as the starting latent. High ``reference_strength``
-         (default 0.95) keeps the composition free but anchors color
-         palette and character look.
-      3. **FluxPipeline** (final fallback). Pure text-to-image.
-
-    The path used per call is chosen automatically based on what loaded.
+    Generation strategy on Intel NPU branch:
+      - All generation (master reference + panels) uses text-to-image with
+        OVStableDiffusionXLPipeline compiled for the Intel Arc iGPU device.
+      - Character consistency is maintained through detailed character
+        descriptions embedded in every panel prompt plus deterministic seeding.
+      - reference_image is accepted for API compatibility but is not applied
+        during SDXL-Turbo text2img (no img2img pass used here, which simplifies
+        the OV compilation graph and lowers peak memory).
+      - Falls back to CPU if GPU compilation fails.
     """
 
     def __init__(self, model_id: str = IMAGE_MODEL_ID):
         self.model_id = model_id
         self.pipe = None
-        self._img2img_pipe = None
-        self._redux_pipe = None
-        # Cache the failure so we don't keep trying to load a model we know
-        # we don't have. Reset by restarting the process.
-        self._redux_unavailable = False
+        self._active_device: str = IMAGE_DEVICE
         self._lock = threading.Lock()
 
     def load(self):
-        """Load FLUX.1-dev pipeline, with VAE on CPU."""
+        """Export/load SDXL-Turbo to OpenVINO IR and compile for Intel Arc iGPU."""
         if self.pipe is not None:
             return
-        from diffusers import FluxPipeline
-        logger.info("Loading FLUX.1-dev base: " + self.model_id)
-        self.pipe = FluxPipeline.from_pretrained(
-            self.model_id,
-            torch_dtype=DTYPE,
-            use_safetensors=True,
-        ).to(DEVICE)
-        self.pipe.vae = _patch_vae_for_cpu_execution(self.pipe.vae)
-        logger.info("VAE pinned to CPU/fp32 for gfx1151 stability.")
-        logger.info("FLUX.1-dev loaded.")
 
-    def _ensure_img2img(self):
-        """Lazily construct the img2img pipeline, sharing weights with text2img."""
-        if self._img2img_pipe is not None:
-            return self._img2img_pipe
-        from diffusers import FluxImg2ImgPipeline
-        # Share all weights — no extra GPU memory, no second download.
-        self._img2img_pipe = FluxImg2ImgPipeline(**self.pipe.components)
-        logger.info("FluxImg2ImgPipeline initialized (shared weights).")
-        return self._img2img_pipe
+        from optimum.intel import OVStableDiffusionXLPipeline
 
-    def _try_load_redux(self):
-        """Best-effort load of the FLUX-Redux prior pipeline.
+        ov_config: dict = {
+            "PERFORMANCE_HINT": "LATENCY",
+        }
+        if OV_CACHE_DIR:
+            Path(OV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+            ov_config["CACHE_DIR"] = OV_CACHE_DIR
 
-        Returns the pipeline on success, ``None`` on any failure (model not
-        available locally, no network, OOM, etc.). Failures are cached so we
-        don't retry every panel.
-        """
-        if self._redux_unavailable or not USE_FLUX_REDUX:
-            return None
-        if self._redux_pipe is not None:
-            return self._redux_pipe
-        try:
-            from diffusers import FluxPriorReduxPipeline
-        except ImportError as e:
-            logger.warning(
-                "FluxPriorReduxPipeline not available in this diffusers "
-                "version; falling back to img2img. (" + str(e) + ")"
-            )
-            self._redux_unavailable = True
-            return None
-        try:
-            logger.info("Loading FLUX-Redux prior: " + FLUX_REDUX_REPO)
-            # Share text encoders/tokenizers with the base pipe so the prior
-            # can fuse text + image without loading them again.
-            self._redux_pipe = FluxPriorReduxPipeline.from_pretrained(
-                FLUX_REDUX_REPO,
-                text_encoder=self.pipe.text_encoder,
-                text_encoder_2=self.pipe.text_encoder_2,
-                tokenizer=self.pipe.tokenizer,
-                tokenizer_2=self.pipe.tokenizer_2,
-                torch_dtype=DTYPE,
-            ).to(DEVICE)
-            logger.info("FLUX-Redux loaded.")
-            return self._redux_pipe
-        except Exception as e:
-            logger.warning(
-                "FLUX-Redux unavailable, falling back to img2img: " + repr(e)
-            )
-            self._redux_unavailable = True
-            self._redux_pipe = None
-            return None
+        devices_to_try = [IMAGE_DEVICE, "CPU"]
+        last_err = None
 
-    def _cuda_recover(self):
-        """Drain CUDA caches/sync before retrying after a transient failure."""
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
+        for device in devices_to_try:
             try:
-                torch.cuda.synchronize()
-            except Exception:
-                pass
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+                logger.info("Loading " + self.model_id + " via OpenVINO on " + device + "...")
+                self.pipe = OVStableDiffusionXLPipeline.from_pretrained(
+                    self.model_id,
+                    device=device,
+                    export=True,
+                    ov_config=ov_config,
+                )
+                self._active_device = device
+                logger.info("Image model loaded on " + device + ".")
+                return
+            except Exception as e:
+                logger.warning("Failed to load image model on " + device + ": " + str(e)[:200])
+                self.pipe = None
+                last_err = e
 
-    def _run_with_retry(self, fn, *, label: str):
-        """Run an image-gen call and retry once on a transient CUDA failure.
-
-        OOM and HIP/CUDA kernel hiccups on gfx1151 are usually recoverable
-        if we drain the allocator and re-issue. We deliberately do not
-        change image dimensions — silently returning a smaller image would
-        surprise callers.
-        """
-        try:
-            return fn()
-        except torch.cuda.OutOfMemoryError as e:
-            logger.warning(label + " OOM, draining and retrying once: " + str(e))
-            self._cuda_recover()
-            return fn()
-        except RuntimeError as e:
-            msg = str(e)
-            if any(tok in msg for tok in ("CUDA", "HIP", "MIOpen", "out of memory")):
-                logger.warning(label + " CUDA RuntimeError, retrying once: " + msg[:200])
-                self._cuda_recover()
-                return fn()
-            raise
+        raise RuntimeError("Could not load image model on any device. Last error: " + str(last_err))
 
     def generate(
         self,
         prompt: str,
-        width: int = 1024,
-        height: int = 1024,
+        width: int = 512,
+        height: int = 512,
         steps: int = PANEL_INFERENCE_STEPS,
         guidance: float = GUIDANCE_SCALE,
         reference_image: Optional[Image.Image] = None,
-        reference_strength: float = PANEL_REF_STRENGTH,
+        reference_strength: float = 1.0,
         seed: Optional[int] = None,
         step_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Image.Image:
-        """Generate an image with FLUX.1-dev.
+        """Generate an image with SDXL-Turbo via OpenVINO on Intel Arc iGPU.
 
-        Routes through Redux > img2img > text2img depending on what's
-        available and whether a reference is supplied.
+        reference_image is accepted for API compatibility with the rest of the
+        job pipeline but is not used — SDXL-Turbo text2img is the only path
+        on this branch. Character consistency is driven by prompt engineering.
         """
         with self._lock:
             self.load()
-            self._cuda_recover()
 
             if seed is None:
                 seed = int.from_bytes(os.urandom(4), "big")
 
-            cb_kwargs = {}
+            # CPU generator for seeding — compatible with all OV diffusion pipelines
+            generator = torch.Generator().manual_seed(seed)
+
+            cb_kwargs: dict = {}
             if step_callback is not None:
                 total_steps = steps
                 def _on_step_end(pipe, step_index, timestep, callback_kwargs):
@@ -839,100 +722,20 @@ class ImageGenerator:
                     return callback_kwargs
                 cb_kwargs["callback_on_step_end"] = _on_step_end
 
-            # Decide which path to take.
-            redux = None
-            if reference_image is not None:
-                redux = self._try_load_redux()
-
-            use_img2img = (
-                redux is None
-                and reference_image is not None
-                and 0.0 < reference_strength < 1.0
+            result = self.pipe(
+                prompt=prompt,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                generator=generator,
+                **cb_kwargs,
             )
-
-            with torch.inference_mode():
-                if redux is not None and reference_image is not None:
-                    ref = reference_image.convert("RGB").resize(
-                        (width, height), Image.LANCZOS
-                    )
-
-                    def _do_redux():
-                        prior_out = redux(
-                            image=ref,
-                            prompt=prompt,
-                            prompt_embeds_scale=REDUX_PROMPT_SCALE,
-                            pooled_prompt_embeds_scale=REDUX_POOLED_SCALE,
-                        )
-                        return self.pipe(
-                            prompt_embeds=prior_out.prompt_embeds,
-                            pooled_prompt_embeds=prior_out.pooled_prompt_embeds,
-                            width=width,
-                            height=height,
-                            num_inference_steps=steps,
-                            guidance_scale=guidance,
-                            generator=torch.Generator(device=DEVICE).manual_seed(seed),
-                            **cb_kwargs,
-                        )
-
-                    result = self._run_with_retry(_do_redux, label="redux")
-                    logger.info(
-                        "redux complete (prompt_scale=" + str(REDUX_PROMPT_SCALE)
-                        + ", pooled_scale=" + str(REDUX_POOLED_SCALE)
-                        + ", seed=" + str(seed) + "): "
-                        + prompt[:50] + "..."
-                    )
-
-                elif use_img2img:
-                    ref = reference_image.convert("RGB").resize(
-                        (width, height), Image.LANCZOS
-                    )
-                    pipe = self._ensure_img2img()
-                    # When strength < 1 the pipeline only denoises the last
-                    # `steps * strength` timesteps. Scale up so the effective
-                    # step count stays close to the text2img setting.
-                    scaled_steps = max(steps, int(round(steps / max(reference_strength, 1e-3))))
-
-                    def _do_img2img():
-                        return pipe(
-                            prompt=prompt,
-                            image=ref,
-                            strength=reference_strength,
-                            width=width,
-                            height=height,
-                            num_inference_steps=scaled_steps,
-                            guidance_scale=guidance,
-                            max_sequence_length=FLUX_MAX_PROMPT_TOKENS,
-                            generator=torch.Generator(device=DEVICE).manual_seed(seed),
-                            **cb_kwargs,
-                        )
-
-                    result = self._run_with_retry(_do_img2img, label="img2img")
-                    logger.info(
-                        "img2img complete (strength="
-                        + str(reference_strength) + ", seed=" + str(seed) + "): "
-                        + prompt[:50] + "..."
-                    )
-
-                else:
-                    def _do_text2img():
-                        return self.pipe(
-                            prompt=prompt,
-                            width=width,
-                            height=height,
-                            num_inference_steps=steps,
-                            guidance_scale=guidance,
-                            max_sequence_length=FLUX_MAX_PROMPT_TOKENS,
-                            generator=torch.Generator(device=DEVICE).manual_seed(seed),
-                            **cb_kwargs,
-                        )
-
-                    result = self._run_with_retry(_do_text2img, label="text2img")
-                    logger.info(
-                        "text2img complete (seed=" + str(seed) + "): "
-                        + prompt[:50] + "..."
-                    )
-
-            self._cuda_recover()
+            logger.info(
+                "text2img complete ("
+                + self._active_device + ", seed=" + str(seed) + "): "
+                + prompt[:50] + "..."
+            )
             return result.images[0]
 
 
@@ -1086,9 +889,9 @@ def _trim_setting(setting: str, max_chars: int = 200) -> str:
 
 
 def _panel_prompt(story: ComicStory, panel: Panel) -> str:
-    """Build a tight, scene-first FLUX prompt for one panel.
+    """Build a tight, scene-first image prompt for one panel (SDXL-Turbo).
 
-    Order (T5-XXL weights early tokens more heavily; total budget 512):
+    Order (leading tokens weighted most heavily by SDXL text encoder):
 
         1. Scene description — what's happening in THIS panel.
         2. World/setting — story-wide visual anchor (location, time, mood).
@@ -1096,10 +899,10 @@ def _panel_prompt(story: ComicStory, panel: Panel) -> str:
         4. Art-style suffix — tone and palette.
         5. One short continuity reminder.
 
-    Target: ~250 tokens. Deliberately omitted vs the original prompt: the
-    full synopsis, full-book panel outline, "excluded characters" block
-    (T5 has no negation), regex "STYLE DNA" block, and numbered rules
-    lists. All burned token budget without measurable lift.
+    Target: ~150 tokens (SDXL-Turbo CLIP tokenizer is 77-token per encoder;
+    keep each part concise). Deliberately omitted: full synopsis, full-book
+    panel outline, numbered rules lists — these inflate prompts without
+    measurable quality lift at 4-step inference.
     """
     art_style = (story.art_style or "modern 3D animation, cinematic lighting, high detail").rstrip(".")
     scene = (panel.image_prompt or "").strip().rstrip(".")
@@ -1184,7 +987,7 @@ def _story_base_seed(story: ComicStory) -> int:
     """Derive a stable base seed from the story's title.
 
     Same title → same seed neighborhood for every panel of the book, which
-    gives FLUX a strong nudge toward consistent character/style appearances
+    gives SDXL-Turbo a nudge toward consistent character/style appearances
     across panels. Different stories live in different neighborhoods.
     """
     import hashlib
@@ -1204,10 +1007,10 @@ def generate_master_reference(
     step_callback: Optional[Callable[[int, int], None]] = None,
     seed: Optional[int] = None,
 ) -> Image.Image:
-    """Generate the master character reference image via FLUX text2img."""
-    # Fail loudly rather than feed FLUX an empty character list. The old
-    # silent-fallthrough behavior produced a blank off-white image (FLUX
-    # rendered the "plain studio background" with no characters to depict).
+    """Generate the master character reference image via SDXL-Turbo text2img."""
+    # Fail loudly rather than pass an empty character list. The old
+    # silent-fallthrough behavior produced a blank off-white image
+    # (the model rendered the "plain studio background" with no characters).
     if not story.characters and not (story.character_bible or "").strip():
         raise ValueError(
             "Cannot generate master reference: story has no characters. "

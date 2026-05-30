@@ -34,10 +34,10 @@ logger = logging.getLogger("comic-server")
 
 
 def _load_models():
-    """Load both AI models into GPU memory."""
+    """Load both AI models via OpenVINO (Intel NPU + Arc iGPU)."""
     try:
         logger.info("=" * 60)
-        logger.info("Loading AI models into GPU memory...")
+        logger.info("Loading AI models via OpenVINO...")
         log_system_resources("PRE-MODEL-LOAD")
         logger.info("=" * 60)
 
@@ -306,7 +306,7 @@ async def process_job(job):
             await loop.run_in_executor(None, generate_single_panel)
             job.progress_current += 1
 
-            # Brief breather between GPU jobs
+            # Brief breather between inference jobs
             await asyncio.sleep(0.5)
 
             # Generate thumbnail for WebSocket preview

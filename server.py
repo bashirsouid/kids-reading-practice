@@ -60,9 +60,9 @@ class StreamToLogger:
 sys.stdout = StreamToLogger(logging.getLogger("STDOUT"), logging.INFO, sys.__stdout__)
 sys.stderr = StreamToLogger(logging.getLogger("STDERR"), logging.ERROR, sys.__stderr__)
 
-# Limit GPU resources (now with logging configured)
-from gpu_utils import limit_gpu_cores
-limit_gpu_cores()
+# Log Intel NPU/iGPU devices (now with logging configured)
+from npu_utils import log_npu_devices
+log_npu_devices()
 
 logger = logging.getLogger("comic-server")
 

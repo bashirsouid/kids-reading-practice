@@ -1,131 +1,135 @@
 #!/usr/bin/env python3
-"""Test script to verify FLUX pipeline can be instantiated correctly."""
+"""Test script to verify Intel NPU branch imports and constants are correct."""
 
 import sys
 import os
 
-# Add the current directory to the path so we can import generator
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def test_flux_pipeline_import():
-    """Test that FluxPipeline can be imported from diffusers."""
-    print("Testing FLUX pipeline import...")
-
+def test_ov_pipeline_import():
+    """Test that OVStableDiffusionXLPipeline can be imported from optimum.intel."""
+    print("Testing OVStableDiffusionXLPipeline import...")
     try:
-        from diffusers import FluxPipeline
-        print(f"  FluxPipeline imported successfully from diffusers")
-        print(f"  FluxPipeline class: {FluxPipeline}")
+        from optimum.intel import OVStableDiffusionXLPipeline
+        print("  OVStableDiffusionXLPipeline imported successfully from optimum.intel")
         return True
     except ImportError as e:
-        print(f"  FAILED: Could not import FluxPipeline: {e}")
+        print("  FAILED: Could not import OVStableDiffusionXLPipeline: " + str(e))
         return False
 
 
-def test_flux_pipeline_init():
-    """Test that FluxPipeline has the expected structure (without downloading the model)."""
-    print("\nTesting FLUX pipeline structure...")
-
+def test_ov_lm_import():
+    """Test that OVModelForCausalLM can be imported from optimum.intel."""
+    print("\nTesting OVModelForCausalLM import...")
     try:
-        import torch
-        from diffusers import FluxPipeline
-
-        # Verify the class has the expected methods and attributes
-        assert hasattr(FluxPipeline, "from_pretrained"), "Missing from_pretrained"
-        assert hasattr(FluxPipeline, "__init__"), "Missing __init__"
-
-        # Verify the pipeline's expected parameter names by inspecting __init__
-        import inspect
-        sig = inspect.signature(FluxPipeline.__init__)
-        param_names = list(sig.parameters.keys())
-        assert "vae" in param_names, "FluxPipeline should accept 'vae' parameter"
-
-        print(f"  FluxPipeline class structure verified")
-        print(f"  Pipeline class: {FluxPipeline}")
-
-        # Verify the model ID resolves to a valid path format
-        model_id = "black-forest-labs/FLUX.1-dev"
-        print(f"  Model ID: {model_id}")
-
+        from optimum.intel import OVModelForCausalLM
+        print("  OVModelForCausalLM imported successfully from optimum.intel")
         return True
-
-    except Exception as e:
-        print(f"  Pipeline structure check error: {e}")
+    except ImportError as e:
+        print("  FAILED: Could not import OVModelForCausalLM: " + str(e))
         return False
 
 
-def test_generator_import():
-    """Test that the ImageGenerator class imports correctly."""
-    print("\nTesting ImageGenerator import...")
-
+def test_generator_constants():
+    """Test that the Intel NPU branch has the expected model IDs and constants."""
+    print("\nTesting generator constants for Intel NPU branch...")
     try:
-        from generator import ImageGenerator, IMAGE_MODEL_ID, PANEL_INFERENCE_STEPS, GUIDANCE_SCALE
-        print(f"  ImageGenerator imported successfully")
-        print(f"  IMAGE_MODEL_ID = {IMAGE_MODEL_ID}")
-        print(f"  PANEL_INFERENCE_STEPS = {PANEL_INFERENCE_STEPS}")
-        print(f"  GUIDANCE_SCALE = {GUIDANCE_SCALE}")
-        assert IMAGE_MODEL_ID == "black-forest-labs/FLUX.1-dev", \
-            f"Expected FLUX model ID, got: {IMAGE_MODEL_ID}"
-        assert PANEL_INFERENCE_STEPS == 28, \
-            f"Expected 28 inference steps, got: {PANEL_INFERENCE_STEPS}"
-        assert GUIDANCE_SCALE == 5.0, \
-            f"Expected guidance_scale 5.0, got: {GUIDANCE_SCALE}"
+        from generator import (
+            ImageGenerator,
+            TextGenerator,
+            IMAGE_MODEL_ID,
+            TEXT_MODEL_ID,
+            PANEL_INFERENCE_STEPS,
+            GUIDANCE_SCALE,
+            NPU_DEVICE,
+            IMAGE_DEVICE,
+            PANEL_GEN_SIZE,
+        )
+        print("  IMAGE_MODEL_ID = " + IMAGE_MODEL_ID)
+        print("  TEXT_MODEL_ID = " + TEXT_MODEL_ID)
+        print("  PANEL_INFERENCE_STEPS = " + str(PANEL_INFERENCE_STEPS))
+        print("  GUIDANCE_SCALE = " + str(GUIDANCE_SCALE))
+        print("  NPU_DEVICE = " + NPU_DEVICE)
+        print("  IMAGE_DEVICE = " + IMAGE_DEVICE)
+        print("  PANEL_GEN_SIZE = " + str(PANEL_GEN_SIZE))
+
+        assert "sdxl-turbo" in IMAGE_MODEL_ID.lower() or "sdxl" in IMAGE_MODEL_ID.lower(), \
+            "Expected SDXL-Turbo image model, got: " + IMAGE_MODEL_ID
+        assert PANEL_INFERENCE_STEPS <= 8, \
+            "Expected <=8 steps for fast inference on NPU branch, got: " + str(PANEL_INFERENCE_STEPS)
+        assert GUIDANCE_SCALE == 0.0, \
+            "Expected guidance_scale=0.0 for SDXL-Turbo, got: " + str(GUIDANCE_SCALE)
+        assert PANEL_GEN_SIZE <= 512, \
+            "Expected PANEL_GEN_SIZE<=512 for SDXL-Turbo, got: " + str(PANEL_GEN_SIZE)
         print("  All assertions passed!")
         return True
     except Exception as e:
-        print(f"  FAILED: {e}")
+        print("  FAILED: " + str(e))
         return False
 
 
-def test_no_ip_adapter_imports():
-    """Verify no IP-Adapter or Lightning references remain in generator.py code."""
-    print("\nVerifying IP-Adapter/Lightning references are removed from code...")
-
+def test_no_cuda_rocm_in_code():
+    """Verify no CUDA/ROCm imports remain in generator.py code paths."""
+    print("\nVerifying no CUDA/ROCm code paths remain in generator.py...")
     try:
         with open(os.path.join(os.path.dirname(__file__), "generator.py"), "r") as f:
             source = f.read()
 
-        forbidden = [
-            "LIGHTNING_LORA",
-            "IP_ADAPTER",
-            "ip_scale",
-            "set_ip_adapter_scale",
-            "StableDiffusionXLPipeline",
-        ]
-
-        # Check only code lines (strip comments to avoid false positives
-        # from explanatory text like "no IP-Adapter").
+        # Strip comments before checking — allow references in docstrings/comments
         code_lines = []
         for line in source.splitlines():
             stripped = line.strip()
-            # Skip pure comment lines and blank lines
             if stripped.startswith("#") or not stripped:
                 continue
-            # Also strip inline comments
             if "#" in line:
                 line = line[:line.index("#")]
             code_lines.append(line)
-
         code_source = "\n".join(code_lines)
+
+        forbidden = [
+            "torch.cuda",
+            "DEVICE = \"cuda\"",
+            ".to(DEVICE)",
+            "torch_dtype=DTYPE",
+            "FluxPipeline",
+            "FluxImg2ImgPipeline",
+            "FluxPriorReduxPipeline",
+            "HSA_CU_MASK",
+            "rocminfo",
+        ]
 
         found = [term for term in forbidden if term in code_source]
         if found:
-            print(f"  FAILED: Found forbidden terms in code: {found}")
+            print("  FAILED: Found forbidden terms in code: " + str(found))
             return False
 
-        print("  All SDXL/Lightning/IP-Adapter code references removed!")
+        print("  No CUDA/ROCm/FLUX code paths found — clean Intel NPU branch!")
         return True
     except Exception as e:
-        print(f"  FAILED: {e}")
+        print("  FAILED: " + str(e))
+        return False
+
+
+def test_npu_utils_import():
+    """Test that npu_utils can be imported."""
+    print("\nTesting npu_utils import...")
+    try:
+        from npu_utils import log_npu_devices
+        print("  npu_utils.log_npu_devices imported successfully")
+        return True
+    except ImportError as e:
+        print("  FAILED: " + str(e))
         return False
 
 
 if __name__ == "__main__":
     results = []
-    results.append(("FluxPipeline import", test_flux_pipeline_import()))
-    results.append(("FluxPipeline init", test_flux_pipeline_init()))
-    results.append(("ImageGenerator import", test_generator_import()))
-    results.append(("No IP-Adapter/Lightning refs", test_no_ip_adapter_imports()))
+    results.append(("OVStableDiffusionXLPipeline import", test_ov_pipeline_import()))
+    results.append(("OVModelForCausalLM import", test_ov_lm_import()))
+    results.append(("Generator constants (Intel NPU)", test_generator_constants()))
+    results.append(("No CUDA/ROCm in code", test_no_cuda_rocm_in_code()))
+    results.append(("npu_utils import", test_npu_utils_import()))
 
     print("\n" + "=" * 60)
     print("SUMMARY")
@@ -133,7 +137,7 @@ if __name__ == "__main__":
     all_passed = True
     for name, passed in results:
         status = "PASS" if passed else "FAIL"
-        print(f"  {name}: {status}")
+        print("  " + name + ": " + status)
         if not passed:
             all_passed = False
 

@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-# Import GPU limiter - must be called early before any GPU operations
-from gpu_utils import limit_gpu_cores
-limit_gpu_cores()
+# Enumerate Intel NPU/iGPU devices early so they appear in the startup log
+from npu_utils import log_npu_devices
+log_npu_devices()
 
 # ── Early Logging Setup ──────────────────────────────────────────────────────
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -76,5 +76,5 @@ __all__ = [
     "OUTPUT_DIR",
     "JOBS_FILE",
     "JOB_ASSETS_DIR",
-    "limit_gpu_cores",
+    "log_npu_devices",
 ]

@@ -3,19 +3,25 @@ services:
     build: .
     ports:
       - "7860:7860"
-    # AMD GPU passthrough (ROCm)
+    # Intel NPU + Arc iGPU passthrough
+    # /dev/accel/accel0 → Intel NPU (requires intel-level-zero-npu driver)
+    # /dev/dri           → Intel Arc iGPU (render nodes for OpenVINO GPU plugin)
     devices:
-      - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
+    device_cgroup_rules:
+      # Allow char devices for Intel NPU (major 261 = accel class)
+      - "c 261:* rmw"
     group_add:
-      - video
       - render
+      - video
     volumes:
       # Persistent HuggingFace model cache
       - hf-cache:/root/.cache/huggingface
+      # Persistent OpenVINO compiled-model cache (avoids recompilation on restart)
+      - ov-cache:/app/.cache/ov_models
       # Output directory for exported comics
       - ./output:/app/output
-      # Persistent logs for debugging crashes
+      # Persistent logs for debugging
       - ./logs:/app/logs
     logging:
       driver: "json-file"
@@ -24,12 +30,11 @@ services:
         max-file: "3"
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
-    # Required for ROCm GPU memory access
-    ipc: host
-    security_opt:
-      - seccomp=unconfined
-    # Restart on crash
+      # Override device assignment if needed:
+      # - NPU_DEVICE=CPU   # force text model to CPU (e.g. if NPU driver missing)
+      # - IMAGE_DEVICE=CPU # force image model to CPU
     restart: unless-stopped
 
 volumes:
   hf-cache:
+  ov-cache:
