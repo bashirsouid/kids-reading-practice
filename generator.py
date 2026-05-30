@@ -617,8 +617,33 @@ def _patch_vae_for_cpu_execution(vae):
 
     def safe_decode(z, *args, **kwargs):
         with torch.no_grad():
+            orig_device = z.device
+            orig_dtype = z.dtype
             z_cpu = z.detach().to(device="cpu", dtype=torch.float32)
-            return original_decode(z_cpu, *args, **kwargs)
+            result = original_decode(z_cpu, *args, **kwargs)
+            # DEBUG: Log result info before moving
+            try:
+                if hasattr(result, 'sample'):
+                    result_sample = result.sample
+                elif isinstance(result, tuple):
+                    result_sample = result[0]
+                else:
+                    result_sample = result
+                logger.info(f"safe_decode: shape={result_sample.shape}, device={result_sample.device}, dtype={result_sample.dtype}")
+                logger.info(f"safe_decode: min={result_sample.min().item():.4f}, max={result_sample.max().item():.4f}, mean={result_sample.mean().item():.4f}")
+            except Exception as e:
+                logger.info(f"safe_decode debug error: {e}")
+            # Move decoded image back to original device/dtype
+            if isinstance(result, tuple):
+                # return_dict=False returns (sample,)
+                result = (result[0].to(device=orig_device, dtype=orig_dtype),) + result[1:]
+            elif hasattr(result, 'sample'):
+                # return_dict=True returns DecoderOutput with sample attribute
+                result.sample = result.sample.to(device=orig_device, dtype=orig_dtype)
+            else:
+                # Fallback: treat as tensor
+                result = result.to(device=orig_device, dtype=orig_dtype)
+            return result
 
     def safe_encode(x, *args, **kwargs):
         with torch.no_grad():
@@ -638,7 +663,7 @@ def _patch_vae_for_cpu_execution(vae):
                 except ImportError:
                     from diffusers.models.vae import DiagonalGaussianDistribution
                 new_params = ld.parameters.to(device=orig_device, dtype=orig_dtype)
-                result.latent_dist = DiagonalGaussianDistribution(new_params)
+                result.latent_dist = DiagonalGaussianDistribution(new_params, deterministic=ld.deterministic)
             return result
 
     vae.decode = safe_decode
