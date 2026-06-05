@@ -3,22 +3,7 @@ services:
     build: .
     ports:
       - "7860:7860"
-    # Intel NPU + Arc iGPU passthrough
-    # /dev/accel/accel0 → Intel NPU (requires intel-level-zero-npu driver)
-    # /dev/dri           → Intel Arc iGPU (render nodes for OpenVINO GPU plugin)
-    devices:
-      - /dev/dri:/dev/dri
-    device_cgroup_rules:
-      # Allow char devices for Intel NPU (major 261 = accel class)
-      - "c 261:* rmw"
-    group_add:
-      - render
-      - video
     volumes:
-      # Persistent HuggingFace model cache
-      - hf-cache:/root/.cache/huggingface
-      # Persistent OpenVINO compiled-model cache (avoids recompilation on restart)
-      - ov-cache:/app/.cache/ov_models
       # Output directory for exported comics
       - ./output:/app/output
       # Persistent logs for debugging
@@ -29,12 +14,5 @@ services:
         max-size: "10m"
         max-file: "3"
     environment:
-      - HF_TOKEN=${HF_TOKEN:-}
-      # Override device assignment if needed:
-      # - NPU_DEVICE=CPU   # force text model to CPU (e.g. if NPU driver missing)
-      # - IMAGE_DEVICE=CPU # force image model to CPU
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     restart: unless-stopped
-
-volumes:
-  hf-cache:
-  ov-cache:

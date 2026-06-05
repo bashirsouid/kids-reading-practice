@@ -34,10 +34,15 @@ logger = logging.getLogger("comic-server")
 
 
 def _load_models():
-    """Load both AI models via OpenVINO (Intel NPU + Arc iGPU)."""
+    """Load both text and image generation models.
+    
+    The text model uses OpenRouter for language generation, and the image
+    generator contacts OpenRouter's image model. Both are lightweight client
+    wrappers, so we instantiate them here.
+    """
     try:
         logger.info("=" * 60)
-        logger.info("Loading AI models via OpenVINO...")
+        logger.info("Loading models via OpenRouter...")
         log_system_resources("PRE-MODEL-LOAD")
         logger.info("=" * 60)
 
@@ -45,6 +50,7 @@ def _load_models():
         global_state.text_gen = TextGenerator()
         global_state.text_gen.load()
 
+        # ImageGenerator performs remote API calls; load validates API key.
         global_state.img_gen = ImageGenerator()
         global_state.img_gen.load()
 

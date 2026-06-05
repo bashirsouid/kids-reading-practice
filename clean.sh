@@ -13,32 +13,26 @@ fi
 
 # Parse flags
 DRY_RUN=false
-NO_VOLUMENS=false
 NO_BUILD=false
 NO_OUTPUT=false
 NO_LOGS=false
-NO_HF_CACHE=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     -n|--dry-run)   DRY_RUN=true; shift ;;
-    --no-volumes)   NO_VOLUMENS=true; shift ;;
     --no-build)     NO_BUILD=true; shift ;;
     --no-output)    NO_OUTPUT=true; shift ;;
     --no-logs)      NO_LOGS=true; shift ;;
-    --no-hf-cache)  NO_HF_CACHE=true; shift ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
-      echo "Clean up all project resources (containers, volumes, build artifacts, etc.)."
+      echo "Clean up all project resources (containers, build artifacts, etc.)."
       echo ""
       echo "Options:"
       echo "  -n, --dry-run      Show what would be cleaned without doing it"
-      echo "  --no-volumes       Skip removing Docker volumes (hf-cache)"
       echo "  --no-build         Skip removing the frontend/ build directory"
       echo "  --no-output        Skip removing the output/ directory"
       echo "  --no-logs          Skip removing the logs/ directory"
-      echo "  --no-hf-cache      Skip removing the HuggingFace cache volume"
       echo "  -h, --help         Show this help message"
       echo ""
       echo "By default, everything is cleaned. Use the --no-* flags to keep specific resources."
@@ -49,25 +43,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Decide what to clean based on --no-* flags
-CLEAN_VOLUMENS=true
 CLEAN_BUILD=true
 CLEAN_OUTPUT=true
 CLEAN_LOGS=true
-CLEAN_HF_CACHE=true
 
-# If ALL --no-* flags are set, still do Docker teardown but skip resource dirs
-if $NO_VOLUMENS && $NO_BUILD && $NO_OUTPUT && $NO_LOGS && $NO_HF_CACHE; then
-  CLEAN_BUILD=false
-  CLEAN_OUTPUT=false
-  CLEAN_LOGS=false
-  echo "Note: all --no-* flags set; will still tear down Docker resources."
-else
-  $NO_VOLUMENS && CLEAN_VOLUMENS=false
-  $NO_BUILD     && CLEAN_BUILD=false
-  $NO_OUTPUT    && CLEAN_OUTPUT=false
-  $NO_LOGS      && CLEAN_LOGS=false
-  $NO_HF_CACHE  && CLEAN_HF_CACHE=false
-fi
+$NO_BUILD && CLEAN_BUILD=false
+$NO_OUTPUT && CLEAN_OUTPUT=false
+$NO_LOGS && CLEAN_LOGS=false
 
 header() {
   echo ""
@@ -84,19 +66,14 @@ run_or_preview() {
   fi
 }
 
-# 1. Tear down Docker Compose (containers + optionally volumes)
+# 1. Tear down Docker Compose (containers)
 header "Docker cleanup"
 
 if [ "$DRY_RUN" = true ]; then
   echo "[DRY RUN] Would: stop and remove containers"
-  $CLEAN_VOLUMENS && echo "[DRY RUN] Would: remove volumes (--remove-orphans)"
 else
   echo "  Stopping and removing containers ..."
   dc down --remove-orphans 2>/dev/null || true
-  if $CLEAN_VOLUMENS; then
-    echo "  Removing volumes ..."
-    dc down -v --remove-orphans 2>/dev/null || true
-  fi
 fi
 
 # 2. Clean frontend build
@@ -128,18 +105,6 @@ if $CLEAN_LOGS; then
     run_or_preview "Remove logs/ directory" "rm -rf logs"
   else
     echo "  No logs/ directory found"
-  fi
-fi
-
-# 5. Clean HuggingFace cache volume
-if $CLEAN_HF_CACHE; then
-  header "HuggingFace cache volume"
-  VOLUME_EXISTS=$(docker volume ls -q --filter name=comic-generator_hf-cache 2>/dev/null || true)
-  if [ -n "$VOLUME_EXISTS" ]; then
-    run_or_preview "Remove Docker volume comic-generator_hf-cache" \
-      "docker volume rm comic-generator_hf-cache"
-  else
-    echo "  HuggingFace cache volume not found (may have been removed with docker compose down -v)"
   fi
 fi
 

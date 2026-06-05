@@ -3,30 +3,17 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 websockets>=13.0
 
-# ── Intel OpenVINO inference stack ──────────────────────────────────────────
-# OpenVINO runtime (includes NPU + GPU plugins for Intel hardware)
-openvino>=2024.5.0
-# HuggingFace ↔ OpenVINO bridge: OVModelForCausalLM, OVStableDiffusionXLPipeline
-optimum-intel[openvino]>=1.21.0
-# Diffusers is still needed for the pipeline base classes used by optimum-intel
-diffusers>=0.31.0
-
-# ── HuggingFace ecosystem ────────────────────────────────────────────────────
-transformers>=4.48.0
-accelerate>=0.30.0
-safetensors>=0.4.0
-huggingface_hub>=0.24.0
-
-# ── PyTorch (CPU-only) ───────────────────────────────────────────────────────
-# Only used for torch.Generator seeding inside OV diffusion pipelines.
-# Install the CPU-only wheel to avoid pulling in CUDA/ROCm drivers:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-torch
-
-# ── Image processing ─────────────────────────────────────────────────────────
+# Image processing
 Pillow>=10.0.0
 
-# ── Other ────────────────────────────────────────────────────────────────────
-sentencepiece
-protobuf
+# HTTP client for OpenRouter API
+httpx[http2]>=0.27.0
+
+# Environment variable loader
+python-dotenv>=1.0.0
+
+# System monitoring
 psutil
+
+# Logging
+# (uses built-in logging module)

@@ -1,24 +1,25 @@
 """
 generator.py - Core AI generation logic for Comic Book Generator.
 
-Intel NPU branch: text generation runs on the Intel NPU via OpenVINO
-(optimum-intel OVModelForCausalLM); image generation runs on the Intel
-Arc iGPU via OpenVINO (OVStableDiffusionXLPipeline with SDXL-Turbo).
+Text generation runs via OpenRouter API (Nemotron-3-Nano / GPT-3.5-Turbo).
+Image generation runs via OpenRouter API (sourceful/riverflow-v2.5-fast:free).
 
-No CUDA or ROCm required. Tested on Lenovo X1 Carbon Gen 13 (Intel Core
-Ultra 200V / Lunar Lake) with Intel NPU 48 TOPS and Intel Arc 140V iGPU.
+No local GPU/NPU inference required - all models run remotely via OpenRouter.
 """
 
 import os
 import random
 import re
 import logging
+import base64
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, Union, List
 import threading
+import io
+from io import BytesIO
 
-import torch  # CPU-only; used for torch.Generator seeding in OV pipelines
+import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger("comic-generator")
@@ -36,27 +37,16 @@ CAPTION_H = 200
 # SDXL-Turbo is trained at 512px; smaller gen size = faster + better quality
 PANEL_GEN_SIZE = 512
 
-# Text model: Qwen2.5-3B-Instruct — runs on Intel NPU via OVModelForCausalLM
-TEXT_MODEL_ID = os.environ.get("TEXT_MODEL_ID", "Qwen/Qwen2.5-3B-Instruct")
+# Text model: OpenRouter — uses OpenRouter API for text generation
+PRIMARY_TEXT_MODEL_ID = os.getenv("PRIMARY_TEXT_MODEL_ID", "google/gemma-4-31b-it:free")
+FALLBACK_TEXT_MODEL_ID = os.getenv("FALLBACK_TEXT_MODEL_ID", "google/gemma-4-26b-a4b-it:free")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Backwards compatibility
+TEXT_MODEL_ID = PRIMARY_TEXT_MODEL_ID
 
-# Image model: SDXL-Turbo — 4-step adversarial distillation; runs on Intel
-# Arc iGPU via OVStableDiffusionXLPipeline. No guidance scale needed.
-IMAGE_MODEL_ID = os.environ.get("IMAGE_MODEL_ID", "stabilityai/sdxl-turbo")
-PANEL_INFERENCE_STEPS = int(os.environ.get("PANEL_INFERENCE_STEPS", "4"))
-GUIDANCE_SCALE = 0.0  # SDXL-Turbo is guidance-free (adversarial distillation)
-
-# Intel device assignment:
-#   NPU_DEVICE  — Intel NPU (transformer LLM inference; 48 TOPS on Lunar Lake)
-#   IMAGE_DEVICE — Intel Arc iGPU (diffusion UNet; better suited for parallel
-#                  rasterization workloads than the NPU)
-# Both fall back to "CPU" if the device is unavailable or compilation fails.
-NPU_DEVICE = os.environ.get("NPU_DEVICE", "NPU")
-IMAGE_DEVICE = os.environ.get("IMAGE_DEVICE", "GPU")
-
-# OpenVINO compiled-model cache: avoids minutes-long recompilation on every
-# startup. The first run writes IR + compiled blobs here; subsequent runs load
-# them instantly. Set to "" to disable.
-OV_CACHE_DIR = os.environ.get("OV_CACHE_DIR", str(Path(__file__).parent / ".cache" / "ov_models"))
+# Image model: OpenRouter image generation model
+# Uses sourceful/riverflow-v2.5-fast:free for free image generation
+IMAGE_MODEL_ID = os.getenv("IMAGE_MODEL_ID", "sourceful/riverflow-v2.5-fast:free")
 
 
 # - Data Classes -
@@ -113,70 +103,63 @@ RANDOM_THEMES = [
 
 # - Text Generator -
 class TextGenerator:
-    """Generates comic story structure using Qwen2.5-3B-Instruct on Intel NPU.
-
-    Uses OVModelForCausalLM (optimum-intel) compiled for the Intel NPU device.
-    On first load the HuggingFace model is exported to OpenVINO IR and compiled
-    for NPU; the result is cached in OV_CACHE_DIR so subsequent starts are fast.
-    Falls back to CPU if NPU compilation fails.
+    """Generates comic story structure via OpenRouter API.
+    
+    Uses OpenRouter's chat completion endpoint for text generation.
     """
 
-    def __init__(self, model_id: str = TEXT_MODEL_ID):
-        self.model_id = model_id
-        self.pipe = None
+    def __init__(self, primary_model: str = PRIMARY_TEXT_MODEL_ID, fallback_model: Optional[str] = FALLBACK_TEXT_MODEL_ID):
+        self.primary_model = primary_model
+        self.fallback_model = fallback_model
         self._lock = threading.Lock()
+        self._active_model: Optional[str] = None
 
     def load(self):
-        """Export/load the text model to OpenVINO and compile for Intel NPU."""
-        if self.pipe is not None:
-            return
+        """Validate that the OpenRouter API key is present."""
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY not set in environment")
+        logger.info("TextGenerator ready to use OpenRouter API.")
 
-        from optimum.intel import OVModelForCausalLM
-        from transformers import AutoTokenizer, pipeline as hf_pipeline
-
-        ov_config = {
-            "PERFORMANCE_HINT": "LATENCY",
-        }
-        if OV_CACHE_DIR:
-            Path(OV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-            ov_config["CACHE_DIR"] = OV_CACHE_DIR
-
-        devices_to_try = [NPU_DEVICE, "CPU"]
-        last_err = None
-        model = None
-        active_device = None
-
-        for device in devices_to_try:
+    def _call_api(self, messages: list[dict], max_tokens: int, temperature: float) -> str:
+        """Call OpenRouter chat completion endpoint, trying primary then fallback."""
+        for model in [self.primary_model, self.fallback_model]:
+            if not model:
+                continue
             try:
-                logger.info("Loading text model " + self.model_id + " on " + device + " via OpenVINO...")
-                model = OVModelForCausalLM.from_pretrained(
-                    self.model_id,
-                    device=device,
-                    export=True,
-                    load_in_4bit=True,
-                    ov_config=ov_config,
-                    trust_remote_code=True,
-                )
-                active_device = device
-                logger.info("Text model loaded on " + device + ".")
-                break
+                logger.info(f"Calling OpenRouter model {model} (max_tokens={max_tokens}, temperature={temperature})")
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/bashirs/comic-generator",
+                    "X-Title": "Comic Generator",
+                }
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                }
+                response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
+                response.raise_for_status()
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                self._active_model = model
+                return content.strip()
             except Exception as e:
-                logger.warning("Failed to load text model on " + device + ": " + str(e)[:200])
-                last_err = e
-
-        if model is None:
-            raise RuntimeError("Could not load text model on any device. Last error: " + str(last_err))
-
-        tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
-        self.pipe = hf_pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-        )
-        logger.info("Text generation pipeline ready on " + active_device + ".")
+                # Attempt to capture detailed response from OpenRouter for debugging
+                resp_text = ""
+                # httpx.HTTPStatusError carries the response object
+                if isinstance(e, httpx.HTTPStatusError) and hasattr(e, "response") and e.response is not None:
+                    try:
+                        resp_text = e.response.text[:500]
+                    except Exception:
+                        resp_text = "<could not read response>"
+                logger.warning(f"OpenRouter model {model} failed: {e}. Response: {resp_text}")
+                continue
+        raise RuntimeError("All OpenRouter models failed to generate a response")
 
     def generate(self, prompt: str, max_tokens: int = 1500) -> str:
-        """Generate text from a prompt."""
+        """Generate text from a prompt using OpenRouter API."""
         with self._lock:
             self.load()
             messages = [
@@ -193,23 +176,7 @@ class TextGenerator:
                 },
                 {"role": "user", "content": prompt},
             ]
-            # Pass ONLY max_new_tokens. Passing max_length alongside (the old
-            # behavior) made transformers treat max_length as the cap on
-            # *prompt+output* tokens, which silently clipped longer character
-            # bibles mid-sentence and confused the downstream parser.
-            out = self.pipe(
-                messages,
-                max_new_tokens=max_tokens,
-                do_sample=True,
-                temperature=0.5,
-                return_full_text=False,
-            )
-            logger.info("Text generation inference complete.")
-            generated = out[0]["generated_text"]
-            if isinstance(generated, list):
-                return generated[-1]["content"].strip()
-            else:
-                return generated.strip()
+            return self._call_api(messages, max_tokens=max_tokens, temperature=0.5)
 
     def generate_story(self, synopsis: str, max_retries: int = 5) -> ComicStory:
         """Generate a complete comic story structure with retry logic."""
@@ -272,24 +239,11 @@ class TextGenerator:
                 "Respond with ONLY the synopsis text, nothing else."
             )
 
-        with self._lock:
-            self.load()
-            messages = [
-                {"role": "system", "content": "You are a creative children's story writer. Respond with only the synopsis text."},
-                {"role": "user", "content": prompt},
-            ]
-            out = self.pipe(
-                messages,
-                max_new_tokens=500,
-                do_sample=True,
-                temperature=0.8,
-                return_full_text=False,
-            )
-            generated = out[0]["generated_text"]
-            if isinstance(generated, list):
-                return generated[-1]["content"].strip()
-            else:
-                return generated.strip()
+        messages = [
+            {"role": "system", "content": "You are a creative children's story writer. Respond with only the synopsis text."},
+            {"role": "user", "content": prompt},
+        ]
+        return self._call_api(messages, max_tokens=500, temperature=0.8)
 
     def generate_title(self, synopsis: str) -> str:
         """Generate a catchy title for the story based on the synopsis."""
@@ -298,24 +252,12 @@ class TextGenerator:
             "'" + synopsis + "'\n\n"
             "Respond with ONLY the title text, nothing else."
         )
-        with self._lock:
-            self.load()
-            messages = [
-                {"role": "system", "content": "You are a creative children's book author. Respond with only the title."},
-                {"role": "user", "content": prompt},
-            ]
-            out = self.pipe(
-                messages,
-                max_new_tokens=50,
-                do_sample=True,
-                temperature=0.7,
-                return_full_text=False,
-            )
-            generated = out[0]["generated_text"]
-            if isinstance(generated, list):
-                return generated[-1]["content"].strip().strip('"').strip("'")
-            else:
-                return generated.strip().strip('"').strip("'")
+        messages = [
+            {"role": "system", "content": "You are a creative children's book author. Respond with only the title."},
+            {"role": "user", "content": prompt},
+        ]
+        title = self._call_api(messages, max_tokens=50, temperature=0.7)
+        return title.strip().strip('"').strip("'")
 
 
 _BIBLE_FORMAT_INSTRUCTIONS = (
@@ -628,82 +570,50 @@ def _parse_reference_profile_text(raw: str, synopsis: str, fallback_title: str) 
 
 # - Image Generator -
 class ImageGenerator:
-    """Generates comic panel images using SDXL-Turbo via OpenVINO on Intel Arc iGPU.
-
-    SDXL-Turbo uses adversarial diffusion distillation (ADD): it produces
-    high-quality images in 1-4 steps with guidance_scale=0. On the Intel Arc
-    140V iGPU this is fast enough for interactive use (~5-15 s/panel).
-
-    Generation strategy on Intel NPU branch:
-      - All generation (master reference + panels) uses text-to-image with
-        OVStableDiffusionXLPipeline compiled for the Intel Arc iGPU device.
-      - Character consistency is maintained through detailed character
-        descriptions embedded in every panel prompt plus deterministic seeding.
-      - reference_image is accepted for API compatibility but is not applied
-        during SDXL-Turbo text2img (no img2img pass used here, which simplifies
-        the OV compilation graph and lowers peak memory).
-      - Falls back to CPU if GPU compilation fails.
+    """Generates comic panel images via OpenRouter API.
+    
+    Uses the sourceful/riverflow-v2.5-fast:free model for free image generation.
+    Character consistency is maintained through detailed character descriptions
+    embedded in every panel prompt plus deterministic seeding when supported.
     """
 
     def __init__(self, model_id: str = IMAGE_MODEL_ID):
         self.model_id = model_id
-        self.pipe = None
-        self._active_device: str = IMAGE_DEVICE
         self._lock = threading.Lock()
 
     def load(self):
-        """Export/load SDXL-Turbo to OpenVINO IR and compile for Intel Arc iGPU."""
-        if self.pipe is not None:
-            return
-
-        from optimum.intel import OVStableDiffusionXLPipeline
-
-        ov_config: dict = {
-            "PERFORMANCE_HINT": "LATENCY",
-        }
-        if OV_CACHE_DIR:
-            Path(OV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-            ov_config["CACHE_DIR"] = OV_CACHE_DIR
-
-        devices_to_try = [IMAGE_DEVICE, "CPU"]
-        last_err = None
-
-        for device in devices_to_try:
-            try:
-                logger.info("Loading " + self.model_id + " via OpenVINO on " + device + "...")
-                self.pipe = OVStableDiffusionXLPipeline.from_pretrained(
-                    self.model_id,
-                    device=device,
-                    export=True,
-                    ov_config=ov_config,
-                )
-                self._active_device = device
-                logger.info("Image model loaded on " + device + ".")
-                return
-            except Exception as e:
-                logger.warning("Failed to load image model on " + device + ": " + str(e)[:200])
-                self.pipe = None
-                last_err = e
-
-        raise RuntimeError("Could not load image model on any device. Last error: " + str(last_err))
+        """Validate that the OpenRouter API key is present."""
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY not set in environment")
+        logger.info("ImageGenerator ready to use OpenRouter API with model: " + self.model_id)
 
     def generate(
         self,
         prompt: str,
         width: int = 512,
         height: int = 512,
-        steps: int = PANEL_INFERENCE_STEPS,
-        guidance: float = GUIDANCE_SCALE,
+        steps: int = 1,
+        guidance: float = 0.0,
         reference_image: Optional[Image.Image] = None,
         reference_strength: float = 1.0,
         seed: Optional[int] = None,
         step_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Image.Image:
-        """Generate an image with SDXL-Turbo via OpenVINO on Intel Arc iGPU.
-
-        reference_image is accepted for API compatibility with the rest of the
-        job pipeline but is not used — SDXL-Turbo text2img is the only path
-        on this branch. Character consistency is driven by prompt engineering.
+        """Generate an image via OpenRouter API.
+        
+        Args:
+            prompt: Text prompt for image generation
+            width: Output image width
+            height: Output image height
+            steps: Ignored (kept for API compatibility)
+            guidance: Ignored (kept for API compatibility)
+            reference_image: Optional reference image for img2img (if supported by model)
+            reference_strength: Strength of reference image influence (if supported)
+            seed: Optional seed for deterministic generation
+            step_callback: Ignored (kept for API compatibility)
+        
+        Returns:
+            PIL Image object
         """
         with self._lock:
             self.load()
@@ -711,32 +621,109 @@ class ImageGenerator:
             if seed is None:
                 seed = int.from_bytes(os.urandom(4), "big")
 
-            # CPU generator for seeding — compatible with all OV diffusion pipelines
-            generator = torch.Generator().manual_seed(seed)
+            # Build the request payload for OpenRouter
+            # The riverflow model accepts image generation via chat completions
+            # with special parameters for image output
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/bashirs/comic-generator",
+                "X-Title": "Comic Generator",
+                "Content-Type": "application/json",
+            }
 
-            cb_kwargs: dict = {}
-            if step_callback is not None:
-                total_steps = steps
-                def _on_step_end(pipe, step_index, timestep, callback_kwargs):
-                    step_callback(step_index + 1, total_steps)
-                    return callback_kwargs
-                cb_kwargs["callback_on_step_end"] = _on_step_end
+            # Prepare the message content - for image models, we send the prompt
+            messages = [{"role": "user", "content": prompt}]
 
-            result = self.pipe(
-                prompt=prompt,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                generator=generator,
-                **cb_kwargs,
+            payload = {
+                "model": self.model_id,
+                "messages": messages,
+                "max_tokens": 1000,
+                # Riverflow is an image-only model - requires modalities parameter
+                "modalities": ["image"],
+            }
+            
+            # Add seed if provided (some models support it)
+            if seed is not None:
+                payload["seed"] = seed
+
+            # Add image generation parameters
+            # Note: Riverflow v2.5 supports aspect_ratio and image_size via image_config
+            # but for simplicity we use the default 1:1 aspect ratio at 1K resolution
+            # If specific dimensions are needed, we can add image_config later
+
+            logger.info(f"Calling OpenRouter image model {self.model_id} (size={width}x{height}, seed={seed})")
+
+            # Make the API call
+            response = httpx.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=180.0,
             )
+            response.raise_for_status()
+            data = response.json()
+
+            # Parse the response - OpenRouter image models return images
+            # in message.images array with base64 data URLs
+            # Format: {"images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}
+            message = data["choices"][0]["message"]
+            images = message.get("images", [])
+            
+            img_data = None
+            
+            if images:
+                # Primary: extract from images array (OpenRouter image model format)
+                image_url = images[0].get("image_url", {}).get("url", "")
+                if isinstance(image_url, str) and image_url.startswith("data:image"):
+                    # Extract base64 data after the comma
+                    b64_data = image_url.split(",")[1]
+                    img_data = base64.b64decode(b64_data)
+                elif isinstance(image_url, str) and image_url.startswith("http"):
+                    # It's a URL - fetch the image
+                    img_response = httpx.get(image_url, timeout=60.0)
+                    img_response.raise_for_status()
+                    img_data = img_response.content
+                else:
+                    # Try to decode as raw base64
+                    try:
+                        img_data = base64.b64decode(image_url)
+                    except Exception:
+                        raise RuntimeError(f"Unexpected image URL format: {image_url[:200]}")
+            else:
+                # Fallback: check if content has base64 data (legacy format)
+                content = message.get("content")
+                if isinstance(content, str) and content.startswith("data:image"):
+                    b64_data = content.split(",")[1]
+                    img_data = base64.b64decode(b64_data)
+                elif isinstance(content, str) and content.startswith("http"):
+                    img_response = httpx.get(content, timeout=60.0)
+                    img_response.raise_for_status()
+                    img_data = img_response.content
+                elif content is not None:
+                    try:
+                        img_data = base64.b64decode(content)
+                    except Exception:
+                        pass
+                
+                if img_data is None:
+                    raise RuntimeError(
+                        f"Unexpected image response format - no images in response. "
+                        f"Message: {message}"
+                    )
+
+            # Load the image using PIL
+            img = Image.open(BytesIO(img_data))
+            img = img.convert("RGB")
+            
+            # Resize to requested dimensions if needed
+            if img.width != width or img.height != height:
+                img = img.resize((width, height), Image.LANCZOS)
+
             logger.info(
-                "text2img complete ("
-                + self._active_device + ", seed=" + str(seed) + "): "
-                + prompt[:50] + "..."
+                f"Image generation complete (seed={seed}): "
+                f"{prompt[:50]}..."
             )
-            return result.images[0]
+            return img
 
 
 # - Comic Page Renderer -

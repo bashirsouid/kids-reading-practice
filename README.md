@@ -1,49 +1,16 @@
-# 📚 AI Comic Book Generator for Kids — Intel NPU Branch
+# 📚 AI Comic Book Generator for Kids — OpenRouter Edition
 
-An AI-powered comic book generator that creates engaging 6-panel reading practice materials for children. This branch (`intel-npu`) ports all AI inference to the **Intel NPU and Intel Arc iGPU** using **OpenVINO**, targeting the **Lenovo X1 Carbon Gen 13** (Intel Core Ultra 200V / Lunar Lake).
-
-> **Platform branch**: This is the `intel-npu` branch. The `main` branch targets AMD Strix Halo (ROCm). See the [branch comparison](#branch-comparison) section for differences.
+An AI-powered comic book generator that creates engaging 6-panel reading practice materials for children. This version uses **OpenRouter API** for both text and image generation, requiring no local GPU or NPU hardware.
 
 ![Example Comic](examples/Penguin_s_Dance_94f7980d.png)
 
 ---
 
-## Hardware Target
-
-| Component | Spec |
-|---|---|
-| **Machine** | Lenovo X1 Carbon Gen 13 |
-| **CPU** | Intel Core Ultra 200V (Lunar Lake) |
-| **NPU** | Intel NPU 4 — ~48 TOPS |
-| **iGPU** | Intel Arc 140V |
-| **RAM** | 16–32 GB LPDDR5x (shared with iGPU) |
-
----
-
-## AI Model Changes (vs main branch)
-
-| | `main` (AMD ROCm) | `intel-npu` (this branch) |
-|---|---|---|
-| **Text model** | Qwen2.5-3B-Instruct via PyTorch on CUDA | Qwen2.5-3B-Instruct via **OVModelForCausalLM** on **Intel NPU** (INT4) |
-| **Image model** | FLUX.1-dev (28 steps) on AMD GPU | **SDXL-Turbo** (4 steps) via **OVStableDiffusionXLPipeline** on **Intel Arc iGPU** |
-| **Inference backend** | PyTorch + ROCm | **OpenVINO** (no CUDA/ROCm) |
-| **Image consistency** | FLUX-Redux SigLIP prior | Prompt-anchored + deterministic seeding |
-
-### Why SDXL-Turbo instead of FLUX.1-dev?
-
-FLUX.1-dev requires 28 inference steps and ~23 GB in FP16. On a laptop iGPU with shared system memory this is impractical. SDXL-Turbo uses adversarial diffusion distillation (ADD) to produce high-quality images in **1–4 steps** with `guidance_scale=0`, making it a natural fit for battery-powered mobile hardware.
-
-The INT4-quantized Qwen2.5-3B-Instruct model on the NPU generates story text in roughly the same latency as the GPU-based version on the main branch, thanks to the NPU's 48 TOPS throughput on transformer workloads.
-
----
-
 ## 🚀 Features
 
-- **Automated Storytelling**: Generates 6-panel stories with age-appropriate vocabulary using **Qwen2.5-3B-Instruct on Intel NPU**.
-- **Fast Illustrations**: Produces vibrant panel art in 4 steps using **SDXL-Turbo on Intel Arc iGPU**.
-- **Zero CUDA/ROCm**: Pure **OpenVINO** inference — works on any Intel AI PC.
-- **Compiled Model Cache**: OpenVINO compiles models for your device on first run and caches them — subsequent starts are instant.
-- **Device Fallback**: Both models automatically fall back to CPU if NPU/GPU drivers are missing.
+- **Automated Storytelling**: Generates 6-panel stories with age-appropriate vocabulary using **OpenRouter text models** (Nemotron-3-Nano, GPT-3.5-Turbo, etc.).
+- **AI Image Generation**: Produces vibrant panel art using **OpenRouter image models** (Riverflow v2.5 Fast).
+- **No Local GPU Required**: Pure API-based inference — works on any machine with internet access.
 - **Interactive UI**: Web interface for previewing, regenerating, and exporting comics.
 
 ---
@@ -51,9 +18,8 @@ The INT4-quantized Qwen2.5-3B-Instruct model on the NPU generates story text in 
 ## 🛠️ Technology Stack
 
 - **Backend**: FastAPI (Python 3.11)
-- **Text inference**: [optimum-intel](https://github.com/huggingface/optimum-intel) `OVModelForCausalLM` on Intel NPU
-- **Image inference**: [optimum-intel](https://github.com/huggingface/optimum-intel) `OVStableDiffusionXLPipeline` on Intel Arc iGPU
-- **OpenVINO runtime**: 2024.5+
+- **Text inference**: OpenRouter API (HTTP-based)
+- **Image inference**: OpenRouter API (Riverflow v2.5 Fast)
 - **Frontend**: React 19 + Vite + Tailwind CSS
 
 ---
@@ -73,12 +39,10 @@ The INT4-quantized Qwen2.5-3B-Instruct model on the NPU generates story text in 
 │   ├── utils.py          # Helper utilities
 │   └── api/routes.py     # All API route handlers
 ├── frontend/             # React/Vite frontend application
-├── generator.py          # AI generation (OpenVINO text + image)
-├── npu_utils.py          # Intel NPU/iGPU device detection
-├── download_models.py    # Pre-download HuggingFace weights
-├── requirements.txt      # Python dependencies (OpenVINO stack)
-├── Dockerfile            # Ubuntu 22.04 + Intel GPU drivers + OpenVINO
-└── docker-compose.yml    # Intel device passthrough (NPU + Arc iGPU)
+├── generator.py          # AI generation (OpenRouter API)
+├── requirements.txt      # Python dependencies
+├── Dockerfile            # Ubuntu 22.04 + Python
+└── docker-compose.yml    # Container orchestration
 ```
 
 ---
@@ -87,40 +51,23 @@ The INT4-quantized Qwen2.5-3B-Instruct model on the NPU generates story text in 
 
 ### Prerequisites
 
-- Linux OS (Ubuntu 22.04+ recommended) or Windows 11 with WSL2
-- Intel Core Ultra 200 series (Lunar Lake) or similar Intel AI PC
-- Intel NPU driver: [`intel-level-zero-npu`](https://github.com/intel/linux-npu-driver/releases)
-- Intel GPU driver: Mesa / Intel compute runtime (`intel-opencl-icd`, `libze-intel-gpu1`)
-- Docker & Docker Compose (for containerized setup)
+- Linux OS (Ubuntu 22.04+ recommended) or any system with Docker
+- Internet access (for OpenRouter API)
+- OpenRouter API key (free tier available)
 
-### 1. Install Intel NPU and GPU drivers (host)
+### 1. Get an OpenRouter API Key
 
-```bash
-# Add Intel repository
-wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
-  | sudo gpg --dearmor -o /usr/share/keyrings/intel-sw-products.gpg
-echo "deb [signed-by=/usr/share/keyrings/intel-sw-products.gpg] https://apt.repos.intel.com/openvino/2025 ubuntu22 main" \
-  | sudo tee /etc/apt/sources.list.d/intel-openvino-2025.list
-
-sudo apt-get update
-sudo apt-get install -y intel-level-zero-npu libze-intel-gpu1 intel-opencl-icd
-
-# Add your user to render group for GPU access
-sudo usermod -aG render,video $USER
-# Log out and back in, then verify:
-ls /dev/dri/renderD*   # should show renderD128 or similar
-ls /dev/accel/         # should show accel0 for NPU
-```
+1. Visit [openrouter.ai](https://openrouter.ai) and sign up
+2. Get your API key from the dashboard
 
 ### 2. Clone and launch with Docker
 
 ```bash
-git clone https://github.com/bashirsouid/kids-reading-practice.git
-cd kids-reading-practice
-git checkout intel-npu
+git clone https://github.com/bashirs/comic-generator.git
+cd comic-generator
 
-# Set your HuggingFace token (needed for gated models)
-export HF_TOKEN=your_token_here
+# Set your OpenRouter API key
+export OPENROUTER_API_KEY=sk-or-your-key-here
 
 docker compose up --build
 ```
@@ -128,14 +75,11 @@ docker compose up --build
 ### 3. Running locally (without Docker)
 
 ```bash
-# Install PyTorch CPU-only first (avoids pulling CUDA wheels)
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# Install remaining dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# (Optional) Pre-download model weights
-python download_models.py
+# Set your OpenRouter API key
+export OPENROUTER_API_KEY=sk-or-your-key-here
 
 # Start server
 python -m backend.main
@@ -152,53 +96,25 @@ All settings are controlled via environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `NPU_DEVICE` | `NPU` | OpenVINO device for text model. Set to `CPU` to force CPU. |
-| `IMAGE_DEVICE` | `GPU` | OpenVINO device for image model. Set to `CPU` to force CPU. |
-| `OV_CACHE_DIR` | `.cache/ov_models` | Where compiled OpenVINO models are cached. |
-| `TEXT_MODEL_ID` | `Qwen/Qwen2.5-3B-Instruct` | HuggingFace model ID for text generation. |
-| `IMAGE_MODEL_ID` | `stabilityai/sdxl-turbo` | HuggingFace model ID for image generation. |
-| `PANEL_INFERENCE_STEPS` | `4` | Diffusion steps per panel (1–8 for SDXL-Turbo). |
-| `HF_TOKEN` | _(empty)_ | HuggingFace token for downloading gated models. |
-
-### First-run model export
-
-On the very first launch, `generator.py` will:
-1. Download the HuggingFace weights (or use the local cache if pre-downloaded).
-2. Export them to **OpenVINO IR format** via `optimum-intel`.
-3. Compile the IR for your target device (NPU / GPU / CPU).
-4. Cache the compiled blobs in `OV_CACHE_DIR`.
-
-This one-time export takes 5–15 minutes for the text model and 10–20 minutes for the image model. After that, startup takes only a few seconds.
+| `OPENROUTER_API_KEY` | _(empty)_ | Your OpenRouter API key (required) |
+| `PRIMARY_TEXT_MODEL_ID` | `openrouter/nvidia/nemotron-3-nano-30b-a3b:free` | Primary text model for story generation |
+| `FALLBACK_TEXT_MODEL_ID` | `openrouter/openai/gpt-3.5-turbo` | Fallback text model if primary fails |
+| `IMAGE_MODEL_ID` | `openrouter/sourceful/riverflow-v2.5-fast:free` | Image generation model |
 
 ---
 
 ## 📖 How It Works
 
 1. **Idea → Script**: You provide a theme (e.g., "A penguin learning to dance").
-2. **LLM on NPU**: Qwen2.5-3B-Instruct (INT4, OpenVINO) generates a 6-panel script with character descriptions, art style, and narrative captions — running on the Intel NPU.
-3. **Image on Arc iGPU**: SDXL-Turbo (OpenVINO) generates each panel in 4 steps using detailed text prompts that include character descriptions for visual consistency — running on the Intel Arc iGPU.
+2. **LLM via OpenRouter**: Text model generates a 6-panel script with character descriptions, art style, and narrative captions.
+3. **Image via OpenRouter**: Riverflow model generates each panel using detailed text prompts that include character descriptions for visual consistency.
 4. **Assembly**: Panels are composited into an 8.5×11″ comic page at 300 DPI, ready for printing or PDF export.
-
----
-
-## Branch Comparison
-
-| Feature | `main` | `intel-npu` |
-|---|---|---|
-| Hardware | AMD Strix Halo (Ryzen AI Max 395) | Intel Core Ultra 200V (X1 Carbon Gen 13) |
-| GPU framework | AMD ROCm / PyTorch | Intel OpenVINO |
-| Text model device | CUDA GPU | Intel NPU (INT4) |
-| Image model | FLUX.1-dev (28 steps) | SDXL-Turbo (4 steps) |
-| Image device | CUDA GPU | Intel Arc iGPU |
-| VAE CPU patch | Yes (AMD gfx1151 stability) | Not needed |
-| Character consistency | FLUX-Redux + img2img | Prompt engineering + seeds |
-| Docker base image | `rocm/pytorch:rocm6.2` | `ubuntu:22.04` + Intel GPU drivers |
 
 ---
 
 ## 🤝 Contributing
 
-Contributions welcome! If you have an Intel AI PC and run this successfully (or find issues), please open an issue with your hardware/driver versions.
+Contributions welcome! If you have improvements or find issues, please open an issue.
 
 ---
 

@@ -60,19 +60,11 @@ class StreamToLogger:
 sys.stdout = StreamToLogger(logging.getLogger("STDOUT"), logging.INFO, sys.__stdout__)
 sys.stderr = StreamToLogger(logging.getLogger("STDERR"), logging.ERROR, sys.__stderr__)
 
-# Log Intel NPU/iGPU devices (now with logging configured)
-from npu_utils import log_npu_devices
-log_npu_devices()
-
 logger = logging.getLogger("comic-server")
 
-import time
-import uuid
 import psutil
-from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from pathlib import Path
 from typing import Optional
 
 import uvicorn
@@ -80,7 +72,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from PIL import Image
 
 from generator import (
     TextGenerator,
@@ -91,6 +82,7 @@ from generator import (
     generate_all_panels,
     regenerate_panel,
     generate_master_reference,
+    panel_seed,
     _panel_gen_dims,
     _panel_prompt,
 )
