@@ -3,6 +3,9 @@ config.py — Configuration constants and paths for the backend.
 """
 
 import logging
+import os
+from dotenv import load_dotenv
+load_dotenv()
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -10,6 +13,9 @@ from logging.handlers import RotatingFileHandler
 # Enumerate Intel NPU/iGPU devices early so they appear in the startup log
 from npu_utils import log_npu_devices
 log_npu_devices()
+
+if not os.getenv("OPENROUTER_API_KEY"):
+    raise RuntimeError("OPENROUTER_API_KEY not set in .env")
 
 # ── Early Logging Setup ──────────────────────────────────────────────────────
 LOG_DIR = Path(__file__).parent.parent / "logs"

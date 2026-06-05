@@ -1,18 +1,19 @@
 """
-generator.py - Core AI generation logic for Comic Book Generator.
-
-Intel NPU branch: text generation runs on the Intel NPU via OpenVINO
-(optimum-intel OVModelForCausalLM); image generation runs on the Intel
-Arc iGPU via OpenVINO (OVStableDiffusionXLPipeline with SDXL-Turbo).
-
-No CUDA or ROCm required. Tested on Lenovo X1 Carbon Gen 13 (Intel Core
-Ultra 200V / Lunar Lake) with Intel NPU 48 TOPS and Intel Arc 140V iGPU.
-"""
+ generator.py - Core AI generation logic for Comic Book Generator.
+ 
+ Intel NPU branch: text generation runs on the Intel NPU via OpenVINO
+ (optimum-intel OVModelForCausalLM); image generation runs on the Intel
+ Arc iGPU via OpenVINO (OVStableDiffusionXLPipeline with SDXL-Turbo).
+ 
+ No CUDA or ROCm required. Tested on Lenovo X1 Carbon Gen 13 (Intel Core
+ Ultra 200V / Lunar Lake) with Intel NPU 48 TOPS and Intel Arc 140V iGPU.
+ """
 
 import os
 import random
 import re
 import logging
+import httpx
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, Union, List
@@ -36,13 +37,17 @@ CAPTION_H = 200
 # SDXL-Turbo is trained at 512px; smaller gen size = faster + better quality
 PANEL_GEN_SIZE = 512
 
-# Text model: Qwen2.5-3B-Instruct — runs on Intel NPU via OVModelForCausalLM
-TEXT_MODEL_ID = os.environ.get("TEXT_MODEL_ID", "Qwen/Qwen2.5-3B-Instruct")
+# OpenRouter text generation model configuration
+PRIMARY_TEXT_MODEL_ID = os.getenv("PRIMARY_TEXT_MODEL_ID", "openrouter/nvidia/nemotron-3-nano-30b-a3b:free")
+FALLBACK_TEXT_MODEL_ID = os.getenv("FALLBACK_TEXT_MODEL_ID", "openrouter/openai/gpt-3.5-turbo")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Backwards compatibility
+TEXT_MODEL_ID = PRIMARY_TEXT_MODEL_ID
 
 # Image model: SDXL-Turbo — 4-step adversarial distillation; runs on Intel
 # Arc iGPU via OVStableDiffusionXLPipeline. No guidance scale needed.
-IMAGE_MODEL_ID = os.environ.get("IMAGE_MODEL_ID", "stabilityai/sdxl-turbo")
-PANEL_INFERENCE_STEPS = int(os.environ.get("PANEL_INFERENCE_STEPS", "4"))
+IMAGE_MODEL_ID = os.getenv("IMAGE_MODEL_ID", "stabilityai/sdxl-turbo")
+PANEL_INFERENCE_STEPS = int(os.getenv("PANEL_INFERENCE_STEPS", "4"))
 GUIDANCE_SCALE = 0.0  # SDXL-Turbo is guidance-free (adversarial distillation)
 
 # Intel device assignment:
@@ -50,13 +55,13 @@ GUIDANCE_SCALE = 0.0  # SDXL-Turbo is guidance-free (adversarial distillation)
 #   IMAGE_DEVICE — Intel Arc iGPU (diffusion UNet; better suited for parallel
 #                  rasterization workloads than the NPU)
 # Both fall back to "CPU" if the device is unavailable or compilation fails.
-NPU_DEVICE = os.environ.get("NPU_DEVICE", "NPU")
-IMAGE_DEVICE = os.environ.get("IMAGE_DEVICE", "GPU")
+NPU_DEVICE = os.getenv("NPU_DEVICE", "NPU")
+IMAGE_DEVICE = os.getenv("IMAGE_DEVICE", "GPU")
 
 # OpenVINO compiled-model cache: avoids minutes-long recompilation on every
 # startup. The first run writes IR + compiled blobs here; subsequent runs load
 # them instantly. Set to "" to disable.
-OV_CACHE_DIR = os.environ.get("OV_CACHE_DIR", str(Path(__file__).parent / ".cache" / "ov_models"))
+OV_CACHE_DIR = os.getenv("OV_CACHE_DIR", str(Path(__file__).parent / ".cache" / "ov_models"))
 
 
 # - Data Classes -
@@ -113,72 +118,60 @@ RANDOM_THEMES = [
 
 # - Text Generator -
 class TextGenerator:
-    """Generates comic story structure using Qwen2.5-3B-Instruct on Intel NPU.
+    """Generates text via OpenRouter API.
 
-    Uses OVModelForCausalLM (optimum-intel) compiled for the Intel NPU device.
-    On first load the HuggingFace model is exported to OpenVINO IR and compiled
-    for NPU; the result is cached in OV_CACHE_DIR so subsequent starts are fast.
-    Falls back to CPU if NPU compilation fails.
+    Uses a primary model and optional fallback model. Model IDs and API key
+    are loaded from environment variables.
     """
 
-    def __init__(self, model_id: str = TEXT_MODEL_ID):
-        self.model_id = model_id
-        self.pipe = None
+    def __init__(self, primary_model: str = PRIMARY_TEXT_MODEL_ID, fallback_model: Optional[str] = FALLBACK_TEXT_MODEL_ID):
+        self.primary_model = primary_model
+        self.fallback_model = fallback_model
         self._lock = threading.Lock()
+        self._active_model: Optional[str] = None
 
     def load(self):
-        """Export/load the text model to OpenVINO and compile for Intel NPU."""
-        if self.pipe is not None:
-            return
+        """Placeholder load method for compatibility.
 
-        from optimum.intel import OVModelForCausalLM
-        from transformers import AutoTokenizer, pipeline as hf_pipeline
+        Validates that the OpenRouter API key is present.
+        """
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY not set in environment")
+        logger.info("TextGenerator ready to use OpenRouter API.")
 
-        ov_config = {
-            "PERFORMANCE_HINT": "LATENCY",
-        }
-        if OV_CACHE_DIR:
-            Path(OV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-            ov_config["CACHE_DIR"] = OV_CACHE_DIR
-
-        devices_to_try = [NPU_DEVICE, "CPU"]
-        last_err = None
-        model = None
-        active_device = None
-
-        for device in devices_to_try:
+    def _call_api(self, messages: list[dict], max_tokens: int, temperature: float) -> str:
+        """Call OpenRouter chat completion endpoint, trying primary then fallback."""
+        for model in [self.primary_model, self.fallback_model]:
+            if not model:
+                continue
             try:
-                logger.info("Loading text model " + self.model_id + " on " + device + " via OpenVINO...")
-                model = OVModelForCausalLM.from_pretrained(
-                    self.model_id,
-                    device=device,
-                    export=True,
-                    load_in_4bit=True,
-                    ov_config=ov_config,
-                    trust_remote_code=True,
-                )
-                active_device = device
-                logger.info("Text model loaded on " + device + ".")
-                break
+                logger.info(f"Calling OpenRouter model {model} (max_tokens={max_tokens}, temperature={temperature})")
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/bashirs/comic-generator",
+                    "X-Title": "Comic Generator",
+                }
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                }
+                response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
+                response.raise_for_status()
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                self._active_model = model
+                return content.strip()
             except Exception as e:
-                logger.warning("Failed to load text model on " + device + ": " + str(e)[:200])
-                last_err = e
-
-        if model is None:
-            raise RuntimeError("Could not load text model on any device. Last error: " + str(last_err))
-
-        tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
-        self.pipe = hf_pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-        )
-        logger.info("Text generation pipeline ready on " + active_device + ".")
+                logger.warning(f"OpenRouter model {model} failed: {e}")
+                continue
+        raise RuntimeError("All OpenRouter models failed to generate a response")
 
     def generate(self, prompt: str, max_tokens: int = 1500) -> str:
-        """Generate text from a prompt."""
+        """Generate text from a prompt using the system prompt defined for comic writing."""
         with self._lock:
-            self.load()
             messages = [
                 {
                     "role": "system",
@@ -193,66 +186,35 @@ class TextGenerator:
                 },
                 {"role": "user", "content": prompt},
             ]
-            # Pass ONLY max_new_tokens. Passing max_length alongside (the old
-            # behavior) made transformers treat max_length as the cap on
-            # *prompt+output* tokens, which silently clipped longer character
-            # bibles mid-sentence and confused the downstream parser.
-            out = self.pipe(
-                messages,
-                max_new_tokens=max_tokens,
-                do_sample=True,
-                temperature=0.5,
-                return_full_text=False,
-            )
-            logger.info("Text generation inference complete.")
-            generated = out[0]["generated_text"]
-            if isinstance(generated, list):
-                return generated[-1]["content"].strip()
-            else:
-                return generated.strip()
+            return self._call_api(messages, max_tokens=max_tokens, temperature=0.5)
 
     def generate_story(self, synopsis: str, max_retries: int = 5) -> ComicStory:
         """Generate a complete comic story structure with retry logic."""
         prompt = _build_story_prompt(synopsis)
         for attempt in range(max_retries):
-            raw = ""
             try:
                 raw = self.generate(prompt, max_tokens=2000)
                 result = _parse_story_text(raw, synopsis)
                 logger.info("Story generation succeeded on attempt " + str(attempt + 1) + ". Panels: " + str(len(result.panels)))
                 return result
             except (KeyError, ValueError) as e:
-                raw_short = raw[:800] + "..." if len(raw) > 800 else raw
-                logger.warning("Story generation attempt " + str(attempt + 1) + " failed: " + str(e))
-                logger.warning("Raw output: " + raw_short)
+                logger.warning(f"Story generation attempt {attempt + 1} failed: {e}")
                 if attempt == max_retries - 1:
-                    raise ValueError(
-                        "Failed to generate valid story after " + str(max_retries) + " attempts: " + str(e)
-                    )
-        raise ValueError("Story generation failed")
+                    raise
 
     def generate_reference_profile(self, synopsis: str, title: str = "Untitled", max_retries: int = 5) -> ComicStory:
         """Generate style and character metadata for the reference step only."""
         prompt = _build_reference_profile_prompt(synopsis, title)
         for attempt in range(max_retries):
-            raw = ""
             try:
-                # 1200 tokens gives the CHARACTER_BIBLE paragraph headroom
-                # even with 3-4 detailed characters; 900 was sometimes
-                # clipping mid-character.
                 raw = self.generate(prompt, max_tokens=1200)
                 result = _parse_reference_profile_text(raw, synopsis, title)
                 logger.info("Reference profile generation succeeded on attempt " + str(attempt + 1) + ".")
                 return result
             except (KeyError, ValueError) as e:
-                raw_short = raw[:800] + "..." if len(raw) > 800 else raw
-                logger.warning("Reference profile generation attempt " + str(attempt + 1) + " failed: " + str(e))
-                logger.warning("Raw output: " + raw_short)
+                logger.warning(f"Reference profile generation attempt {attempt + 1} failed: {e}")
                 if attempt == max_retries - 1:
-                    raise ValueError(
-                        "Failed to generate valid reference profile after " + str(max_retries) + " attempts: " + str(e)
-                    )
-        raise ValueError("Reference profile generation failed")
+                    raise
 
     def generate_random_synopsis(self, theme: Optional[str] = None) -> str:
         """Generate a longer random story synopsis (5-8 sentences)."""
@@ -271,25 +233,11 @@ class TextGenerator:
                 "Make sure it has a clear situation/setup, a conflict/action, and a brief resolution. "
                 "Respond with ONLY the synopsis text, nothing else."
             )
-
-        with self._lock:
-            self.load()
-            messages = [
-                {"role": "system", "content": "You are a creative children's story writer. Respond with only the synopsis text."},
-                {"role": "user", "content": prompt},
-            ]
-            out = self.pipe(
-                messages,
-                max_new_tokens=500,
-                do_sample=True,
-                temperature=0.8,
-                return_full_text=False,
-            )
-            generated = out[0]["generated_text"]
-            if isinstance(generated, list):
-                return generated[-1]["content"].strip()
-            else:
-                return generated.strip()
+        messages = [
+            {"role": "system", "content": "You are a creative children's story writer. Respond with only the synopsis text."},
+            {"role": "user", "content": prompt},
+        ]
+        return self._call_api(messages, max_tokens=500, temperature=0.8)
 
     def generate_title(self, synopsis: str) -> str:
         """Generate a catchy title for the story based on the synopsis."""
@@ -298,24 +246,12 @@ class TextGenerator:
             "'" + synopsis + "'\n\n"
             "Respond with ONLY the title text, nothing else."
         )
-        with self._lock:
-            self.load()
-            messages = [
-                {"role": "system", "content": "You are a creative children's book author. Respond with only the title."},
-                {"role": "user", "content": prompt},
-            ]
-            out = self.pipe(
-                messages,
-                max_new_tokens=50,
-                do_sample=True,
-                temperature=0.7,
-                return_full_text=False,
-            )
-            generated = out[0]["generated_text"]
-            if isinstance(generated, list):
-                return generated[-1]["content"].strip().strip('"').strip("'")
-            else:
-                return generated.strip().strip('"').strip("'")
+        messages = [
+            {"role": "system", "content": "You are a creative children's book author. Respond with only the title."},
+            {"role": "user", "content": prompt},
+        ]
+        title = self._call_api(messages, max_tokens=50, temperature=0.7)
+        return title.strip().strip('"').strip("'")
 
 
 _BIBLE_FORMAT_INSTRUCTIONS = (
@@ -345,7 +281,7 @@ def _build_story_prompt(synopsis: str) -> str:
     descriptions naturally contain compound words ("palm-sized",
     "pale-blue"), and the earlier parser's name/desc separator regex
     treated those internal dashes as boundaries, producing nonsense
-    "character names" and producing blank studio images.
+    "character names" and feeding the image model a blank-rendering prompt.
     """
     return (
         "Write a 6-panel children's comic book story based on this synopsis:\n"
@@ -482,7 +418,7 @@ def _auto_detect_characters(character_bible: str) -> list[Character]:
         if ':' not in line:
             continue
         name, _, desc = line.partition(':')
-        name = re.sub(r'[\*\_`]', '', name).strip()
+        name = re.sub(r'[\*\_\`]', '', name).strip()
         add(name, desc.strip())
 
     # Pass 2: every "ProperNoun: ..." occurrence anywhere in the text.
@@ -652,40 +588,55 @@ class ImageGenerator:
         self._lock = threading.Lock()
 
     def load(self):
-        """Export/load SDXL-Turbo to OpenVINO IR and compile for Intel Arc iGPU."""
+        """Export/load SDXL-Turbo to OpenVINO IR and compile for Intel Arc iGPU.
+        
+        No CPU fallback — raises RuntimeError if GPU/NPU unavailable.
+        """
         if self.pipe is not None:
             return
 
         from optimum.intel import OVStableDiffusionXLPipeline
 
-        ov_config: dict = {
-            "PERFORMANCE_HINT": "LATENCY",
-        }
+        # ov_config dict for OpenVINO (not OVConfig object)
+        ov_config = {"PERFORMANCE_HINT": "LATENCY"}
         if OV_CACHE_DIR:
-            Path(OV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
             ov_config["CACHE_DIR"] = OV_CACHE_DIR
 
-        devices_to_try = [IMAGE_DEVICE, "CPU"]
-        last_err = None
+        # Try to load pre-exported model from cache first, then export if needed
+        cached_model_dir = Path(OV_CACHE_DIR) / self.model_id.replace("/", "--") if OV_CACHE_DIR else None
 
-        for device in devices_to_try:
-            try:
-                logger.info("Loading " + self.model_id + " via OpenVINO on " + device + "...")
+        try:
+            # Check if model was pre-exported (directories for each submodel component)
+            if cached_model_dir and cached_model_dir.exists() and (cached_model_dir / "unet" / "openvino_model.xml").exists():
+                # Try loading the pre-exported model
+                logger.info("Loading pre-exported model from " + str(cached_model_dir) + "...")
+                self.pipe = OVStableDiffusionXLPipeline.from_pretrained(
+                    str(cached_model_dir),
+                    device=IMAGE_DEVICE.upper(),
+                    ov_config=ov_config,
+                )
+            else:
+                # If no pre-exported model, try exporting on-demand
+                Path(OV_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+                logger.info("Exporting " + self.model_id + " to OpenVINO IR format...")
                 self.pipe = OVStableDiffusionXLPipeline.from_pretrained(
                     self.model_id,
-                    device=device,
                     export=True,
                     ov_config=ov_config,
                 )
-                self._active_device = device
-                logger.info("Image model loaded on " + device + ".")
-                return
-            except Exception as e:
-                logger.warning("Failed to load image model on " + device + ": " + str(e)[:200])
-                self.pipe = None
-                last_err = e
+                # Save exported model for future use
+                if cached_model_dir and OV_CACHE_DIR:
+                    logger.info("Saving exported model to cache...")
+                    self.pipe.save_pretrained(str(cached_model_dir))
+        except Exception as e:
+            raise RuntimeError("Could not load image model on " + IMAGE_DEVICE + ". No CPU fallback. Error: " + str(e)[:200])
 
-        raise RuntimeError("Could not load image model on any device. Last error: " + str(last_err))
+        # Compile all submodels for the target device
+        logger.info("Compiling model for OpenVINO device: " + IMAGE_DEVICE + "...")
+        self.pipe.compile()
+
+        self._active_device = IMAGE_DEVICE
+        logger.info("Image model loaded on " + IMAGE_DEVICE + ".")
 
     def generate(
         self,

@@ -1,0 +1,13 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+node_modules
+*.log
+.env
+.env.*
+.docker
+.DS_Store
+Thumbs.db
+*.patch
+scratch/

@@ -8,6 +8,7 @@ services:
     # /dev/dri           → Intel Arc iGPU (render nodes for OpenVINO GPU plugin)
     devices:
       - /dev/dri:/dev/dri
+      - /dev/accel/accel0:/dev/accel/accel0
     device_cgroup_rules:
       # Allow char devices for Intel NPU (major 261 = accel class)
       - "c 261:* rmw"
@@ -18,7 +19,7 @@ services:
       # Persistent HuggingFace model cache
       - hf-cache:/root/.cache/huggingface
       # Persistent OpenVINO compiled-model cache (avoids recompilation on restart)
-      - ov-cache:/app/.cache/ov_models
+      - ./.cache/ov_models:/app/.cache/ov_models
       # Output directory for exported comics
       - ./output:/app/output
       # Persistent logs for debugging
@@ -30,6 +31,9 @@ services:
         max-file: "3"
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - PRIMARY_TEXT_MODEL_ID=${PRIMARY_TEXT_MODEL_ID:-google/gemma-4-31b-it:free}
+      - FALLBACK_TEXT_MODEL_ID=${FALLBACK_TEXT_MODEL_ID:-google/gemma-4-26b-a4b-it:free}
       # Override device assignment if needed:
       # - NPU_DEVICE=CPU   # force text model to CPU (e.g. if NPU driver missing)
       # - IMAGE_DEVICE=CPU # force image model to CPU
@@ -37,4 +41,3 @@ services:
 
 volumes:
   hf-cache:
-  ov-cache:
