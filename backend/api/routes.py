@@ -18,6 +18,7 @@ from generator import (
     Character,
     render_page,
     generate_master_reference,
+    generate_all_panels,
     regenerate_panel,
     panel_seed,
     _panel_gen_dims,
@@ -34,14 +35,14 @@ from ..models import (
     UpdatePanelsRequest, UpdateCharacterRequest,
 )
 from .. import state as global_state
-from ..persistence import save_jobs
+from ..persistence import save_jobs, delete_job_assets
 from ..utils import _image_to_base64, _find_job, _make_project_slug, log_system_resources
 from ..broadcasting import (
     broadcast_job_update,
     broadcast_image_generating,
     _make_step_callback,
-    _get_queue_position,
 )
+from ..jobs import process_job
 
 logger = logging.getLogger("comic-server")
 router = APIRouter()
@@ -78,7 +79,6 @@ async def health_check():
         "models_loaded": global_state.models_loaded,
         "models_loading": global_state.models_loading,
         "active_jobs": len([j for j in global_state.jobs.values() if j.status not in (JobStatus.COMPLETE, JobStatus.ERROR)]),
-        "queue_size": global_state.job_queue.qsize(),
     }
 
 
@@ -89,7 +89,7 @@ async def list_recent_jobs():
         [j for j in global_state.jobs.values() if j.slug],
         key=lambda j: j.created_at,
         reverse=True
-    )[:10]
+    )
     return [
         {
             "job_id": j.job_id,
@@ -134,7 +134,6 @@ def _build_job_status_response(job):
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,
         "error": job.error,
-        "queue_position": _get_queue_position(job.job_id),
         "wait_for_user": job.wait_for_user,
         "has_reference": job.story.master_reference is not None if job.story else False,
     }
@@ -168,9 +167,11 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
     """WebSocket for real-time job progress updates."""
     await websocket.accept()
 
-    if job_id not in global_state.active_websockets:
-        global_state.active_websockets[job_id] = []
-    global_state.active_websockets[job_id].append(websocket)
+    # Thread-safe registration of websocket
+    async with global_state._ws_lock:
+        if job_id not in global_state.active_websockets:
+            global_state.active_websockets[job_id] = []
+        global_state.active_websockets[job_id].append(websocket)
 
     try:
         job = global_state.jobs.get(job_id)
@@ -188,9 +189,10 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
     except WebSocketDisconnect:
         pass
     finally:
-        ws_list = global_state.active_websockets.get(job_id, [])
-        if websocket in ws_list:
-            ws_list.remove(websocket)
+        async with global_state._ws_lock:
+            ws_list = global_state.active_websockets.get(job_id, [])
+            if websocket in ws_list:
+                ws_list.remove(websocket)
 
 
 # ── Job Management Routes ────────────────────────────────────────────────────
@@ -203,16 +205,20 @@ async def api_generate(req: GenerateRequest):
     job_id = str(uuid.uuid4())
     job = ComicJob(
         job_id=job_id,
-        status=JobStatus.QUEUED,
+        status=JobStatus.GENERATING_SYNOPSIS,
         mode=req.mode,
         input_text=req.text,
         created_at=time.time(),
         slug=_make_project_slug(job_id),
     )
     global_state.jobs[job_id] = job
-    global_state.job_queue.put_nowait(job_id)
-    save_jobs()
+    save_jobs()  # Persist immediately for recovery on refresh
     logger.info(f"New job created: {job_id} (mode={req.mode})")
+    
+    # Start processing job directly (no queue) - use create_task since process_job
+    # has wait_for_user loops that pause execution
+    asyncio.create_task(process_job(job))
+    
     return {"job_id": job_id, "slug": job.slug}
 
 
@@ -225,6 +231,28 @@ async def api_cancel(job_id: str):
     job.cancel_requested = True
     save_jobs()
     return {"status": "cancelled"}
+
+
+@router.delete("/api/project/{slug}")
+async def api_delete_project(slug: str):
+    """Delete a project and all its assets."""
+    job = _find_job(slug)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_id = job.job_id
+    
+    # Delete assets directory first
+    delete_job_assets(job_id)
+    
+    # Remove job from memory
+    del global_state.jobs[job_id]
+    
+    # Persist changes
+    save_jobs()
+    
+    logger.info(f"Deleted project {slug} (job_id: {job_id})")
+    return {"status": "deleted", "slug": slug}
 
 
 # ── Panel Routes ─────────────────────────────────────────────────────────────
@@ -245,7 +273,7 @@ async def api_regenerate_panel(req: RegeneratePanelRequest):
 
     loop = asyncio.get_event_loop()
     modification = req.modification if req.modification else None
-    step_cb = _make_step_callback(job, "panel", req.panel_index)
+    step_cb = _make_step_callback(req.job_id, "panel", req.panel_index)
 
     await loop.run_in_executor(
         None,
@@ -523,10 +551,23 @@ async def _generate_reference_task(job):
         logger.info(f"Job {job.job_id}: generating master character reference...")
         log_system_resources(f"JOB-{job.job_id}-MASTER-REF")
 
-        step_cb = _make_step_callback(job, "reference")
-        await loop.run_in_executor(
-            None, generate_master_reference, job.story, global_state.img_gen, step_cb
-        )
+        step_cb = _make_step_callback(job.job_id, "reference")
+        try:
+            # Add timeout for reference generation (90 seconds)
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, generate_master_reference, job.story, global_state.img_gen, step_cb
+                ),
+                timeout=90.0
+            )
+        except asyncio.TimeoutError:
+            job.status = JobStatus.ERROR
+            job.error = "Reference image generation timed out - please try again"
+            save_jobs()
+            await broadcast_job_update(job)
+            logger.error(f"Reference generation timed out for job {job.job_id}")
+            return
+        
         await asyncio.sleep(0.5)
 
         job.progress_current = 1
@@ -562,7 +603,7 @@ async def api_generate_panels(job_id: str):
 
 
 async def _generate_panels_task(job):
-    """Background task to generate panel images."""
+    """Background task to generate panel images in parallel."""
     loop = asyncio.get_event_loop()
     story = job.story
 
@@ -584,45 +625,57 @@ async def _generate_panels_task(job):
         job.progress_current = 0
         job.error = None
         job.cancel_requested = False
+        save_jobs()
         await broadcast_job_update(job)
 
-        for panel in story.panels:
-            if panel.is_placeholder or panel.image is not None:
-                continue
-
-            if job.cancel_requested:
-                job.status = JobStatus.ERROR
-                job.error = "Generation cancelled by user"
-                await broadcast_job_update(job)
-                return
-
-            log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
+        # Broadcast image_generating for all panels at once (parallel generation)
+        for panel in panels_needing_images:
             await broadcast_image_generating(job, "panel", panel.index)
 
-            step_cb = _make_step_callback(job, "panel", panel.index)
+        def progress_callback(panel_idx: int, completed: int, total: int):
+            """Update job progress and broadcast as panels complete in parallel."""
+            job.progress_current = completed
+            # Generate thumbnail for completed panel
+            if panel_idx < len(story.panels):
+                panel = story.panels[panel_idx]
+                if panel.image:
+                    job.panel_thumbnails[panel_idx] = _image_to_base64(
+                        panel.image, max_size=256
+                    )
+            save_jobs()
+            # Dispatch coroutine to event loop from worker thread
+            asyncio.run_coroutine_threadsafe(
+                broadcast_job_update(job),
+                loop,
+            )
 
-            def generate_single_panel(p=panel, cb=step_cb):
-                gen_w, gen_h = _panel_gen_dims(p.index)
-                p.image = global_state.img_gen.generate(
-                    prompt=_panel_prompt(story, p),
-                    width=gen_w,
-                    height=gen_h,
-                    reference_image=story.master_reference,
-                    seed=panel_seed(story, p.index),
-                    step_callback=cb,
+        try:
+            # Run parallel panel generation in executor
+            def generate_all_wrapper():
+                generate_all_panels(
+                    story,
+                    global_state.img_gen,
+                    progress_callback=progress_callback,
                 )
 
-            await loop.run_in_executor(None, generate_single_panel)
-            job.progress_current += 1
-            await asyncio.sleep(0.5)
-
-            if panel.image:
-                job.panel_thumbnails[panel.index] = _image_to_base64(
-                    panel.image, max_size=256
-                )
-                save_jobs()
-
+            await asyncio.wait_for(
+                loop.run_in_executor(None, generate_all_wrapper),
+                timeout=540.0,  # 90 seconds per panel * 6 panels
+            )
+        except asyncio.TimeoutError:
+            job.status = JobStatus.ERROR
+            job.error = "Panel generation timed out - please try again"
+            save_jobs()
             await broadcast_job_update(job)
+            logger.error(f"Panel generation timed out for job {job.job_id}")
+            return
+        except Exception as e:
+            job.status = JobStatus.ERROR
+            job.error = f"Failed to generate panels: {str(e)}"
+            save_jobs()
+            await broadcast_job_update(job)
+            logger.error(f"Panel generation failed for job {job.job_id}: {e}")
+            return
 
         job.stage = "complete"
         job.status = JobStatus.COMPLETE
@@ -656,6 +709,19 @@ async def api_proceed_to_next_stage(job_id: str):
         if not job.story or not job.story.panels:
             raise HTTPException(status_code=400, detail="Panel breakdown has not been generated yet")
         job.stage = "panels"
+    elif job.stage == "panels":
+        # When user clicks Next at the panels stage, check if all non-placeholder panels have images
+        if not job.story or not job.story.panels:
+            raise HTTPException(status_code=400, detail="Panel breakdown has not been generated yet")
+        all_panels_done = all(
+            p.image is not None for p in job.story.panels if not p.is_placeholder
+        )
+        if not all_panels_done:
+            raise HTTPException(status_code=400, detail="Panel images not generated yet - please generate all panel images first")
+        job.stage = "complete"
+        job.status = JobStatus.COMPLETE
+        save_jobs()
+        await broadcast_job_update(job)
 
     job.wait_for_user = False
     logger.info(f"Job {job_id}: user requested to proceed from stage '{job.stage}'")
@@ -678,13 +744,14 @@ async def api_update_panel(req: UpdatePanelRequest):
         panel.caption = req.caption
     if req.image_prompt is not None:
         panel.image_prompt = req.image_prompt
+    if req.characters is not None:
+        panel.characters = req.characters
 
     if panel.is_placeholder:
-        is_still_placeholder = (
-            (not panel.caption or panel.caption.startswith("[Placeholder")) or
-            (not panel.image_prompt or panel.image_prompt.startswith("[Placeholder"))
-        )
-        if not is_still_placeholder:
+        # Check if both required fields have real content (not placeholder or empty)
+        has_real_caption = panel.caption and not panel.caption.startswith("[Placeholder")
+        has_real_image_prompt = panel.image_prompt and not panel.image_prompt.startswith("[Placeholder")
+        if has_real_caption and has_real_image_prompt:
             panel.is_placeholder = False
             logger.info(f"Cleared placeholder flag for panel {req.panel_index + 1}")
 
@@ -714,11 +781,11 @@ async def api_update_panels(req: UpdatePanelsRequest):
         if "is_placeholder" in panel_data:
             panel.is_placeholder = panel_data["is_placeholder"]
         else:
-            is_still_placeholder = (
-                (not panel.caption or panel.caption.startswith("[Placeholder")) or
-                (not panel.image_prompt or panel.image_prompt.startswith("[Placeholder"))
-            )
-            panel.is_placeholder = is_still_placeholder
+            # Auto-detect if panel is still placeholder based on content
+            # A panel is a placeholder if either caption OR image_prompt is empty/placeholder
+            has_real_caption = panel.caption and not panel.caption.startswith("[Placeholder")
+            has_real_image_prompt = panel.image_prompt and not panel.image_prompt.startswith("[Placeholder")
+            panel.is_placeholder = not (has_real_caption and has_real_image_prompt)
 
     logger.info(f"Updated {len(req.panels)} panels for job {req.job_id}")
     save_jobs()
@@ -760,8 +827,19 @@ async def export_comic(job_id: str):
     if not job or not job.story:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.status != JobStatus.COMPLETE:
-        raise HTTPException(status_code=400, detail="Job not complete yet")
+    # Allow export if job is complete OR all non-placeholder panels have images
+    all_panels_done = job.story and all(
+        p.image is not None for p in job.story.panels if not p.is_placeholder
+    )
+    if job.status != JobStatus.COMPLETE and job.stage != "complete" and not all_panels_done:
+        raise HTTPException(status_code=400, detail="Job not complete yet - panel images are still being generated")
+
+    # If panels are done but status isn't COMPLETE, update it now
+    if all_panels_done and job.status != JobStatus.COMPLETE:
+        job.stage = "complete"
+        job.status = JobStatus.COMPLETE
+        save_jobs()
+        await broadcast_job_update(job)
 
     page = render_page(job.story)
 

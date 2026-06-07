@@ -48,50 +48,35 @@ export function StoryContentPage() {
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-  // Sync with wizard state when story is updated
-  useEffect(() => {
-    if (state.story?.title) {
-      setTitle(state.story.title);
-    }
-    if (state.story?.synopsis) {
-      setSynopsis(state.story.synopsis);
-    }
-    // Character metadata indicates the reference step is ready.
-    if (state.story?.character_bible) {
-      setStoryGenerated(true);
-    }
-  }, [state.story]);
+// Sync with wizard state only once on initial load, NOT on subsequent story updates
+   // to avoid overwriting user edits with stale server data.
+   const didSyncFromGlobal = React.useRef(false);
+   useEffect(() => {
+     if (!didSyncFromGlobal.current && state.story) {
+       didSyncFromGlobal.current = true;
+       if (state.story.title) {
+         setTitle(state.story.title);
+       }
+       if (state.story.synopsis) {
+         setSynopsis(state.story.synopsis);
+       }
+       // Character metadata indicates the reference step is ready.
+       if (state.story.character_bible) {
+         setStoryGenerated(true);
+       }
+     }
+   }, [state.story]);
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'storyContent' });
   }, []);
 
-  // Handle story updates from WebSocket
-  const handleStoryUpdate = useCallback((storyUpdate?: WebSocketStory | null) => {
-    if (storyUpdate && storyUpdate.character_bible) {
-      const convertedPanels = (storyUpdate.panels || []).map((p) => ({
-        index: p.index,
-        caption: p.caption,
-        image_prompt: p.image_prompt,
-        characters: p.characters,
-        image: null,
-        is_placeholder: p.is_placeholder,
-      }));
-      dispatch({
-        type: 'SET_STORY',
-        payload: {
-          title: storyUpdate.title || 'Untitled',
-          synopsis: storyUpdate.synopsis || '',
-          art_style: storyUpdate.art_style || '',
-          story_setting: storyUpdate.story_setting || '',
-          character_bible: storyUpdate.character_bible || '',
-          characters: storyUpdate.characters || [],
-          panels: convertedPanels,
-        },
-      });
-      setStoryGenerated(true);
-    }
-  }, [dispatch]);
+// Handle story updates from WebSocket - only track generation completion, don't overwrite user edits
+   const handleStoryUpdate = useCallback((storyUpdate?: WebSocketStory | null) => {
+     if (storyUpdate && storyUpdate.character_bible) {
+       setStoryGenerated(true);
+     }
+   }, []);
 
   // WebSocket hook to wait for story generation to complete after confirmation
   useWebSocket({

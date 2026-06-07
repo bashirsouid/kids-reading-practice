@@ -1,9 +1,20 @@
 """
-jobs.py — Job processing worker and process_job function.
+jobs.py — Job processing functions for Comic Book Generator.
+
+Workflow:
+1. Synopsis generation (for random/themed modes) or wait for user input (custom mode)
+2. Story synopsis confirmation
+3. Reference profile generation (no panels yet)
+4. WAIT for user to proceed to style/reference
+5. Style/reference image generation
+6. WAIT for user to proceed to panel breakdown
+7. Panel breakdown (allow editing)
+8. Panel image generation
 """
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 
@@ -26,8 +37,6 @@ from .persistence import save_jobs, _job_assets_dir
 from .broadcasting import (
     broadcast_job_update,
     broadcast_image_generating,
-    broadcast_image_progress,
-    _make_step_callback,
 )
 
 logger = logging.getLogger("comic-server")
@@ -66,33 +75,13 @@ def _load_models():
         global_state.models_loaded = False
 
 
-async def job_worker():
-    """Single-worker consumer that processes one job at a time."""
-    while True:
-        job_id = await global_state.job_queue.get()
-        job = global_state.jobs.get(job_id)
-        if not job:
-            global_state.job_queue.task_done()
-            continue
-
-        try:
-            await process_job(job)
-        except Exception as e:
-            logger.error(f"Job {job_id} failed: {e}", exc_info=True)
-            job.status = JobStatus.ERROR
-            job.error = str(e)
-            await broadcast_job_update(job)
-        finally:
-            global_state.job_queue.task_done()
-
-
 async def process_job(job):
     """Process a single comic generation job.
 
     Workflow:
     1. Synopsis generation (for random/themed modes) or wait for user input (custom mode)
     2. Story synopsis confirmation
-    3. Reference profile generation (no panels)
+    3. Reference profile generation (no panels yet)
     4. WAIT for user to proceed to style/reference
     5. Style/reference image generation
     6. WAIT for user to proceed to panel breakdown
@@ -115,11 +104,35 @@ async def process_job(job):
             await broadcast_job_update(job)
 
             theme = job.input_text if job.mode == "themed" else None
-            synopsis = await loop.run_in_executor(
-                None, global_state.text_gen.generate_random_synopsis, theme
-            )
-            job.input_text = synopsis
-            logger.info(f"Generated synopsis: {synopsis}")
+            seed = int.from_bytes(os.urandom(4), "big")
+            job.synopsis_seed = seed
+            save_jobs()  # Save job state before API call for recovery
+            
+            try:
+                # Add timeout for synopsis generation (30 seconds)
+                synopsis = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, global_state.text_gen.generate_random_synopsis, theme, seed
+                    ),
+                    timeout=30.0
+                )
+                job.input_text = synopsis
+                logger.info(f"Generated synopsis with seed {seed}: {synopsis[:50]}...")
+            except asyncio.TimeoutError:
+                job.status = JobStatus.ERROR
+                job.error = "Synopsis generation timed out - please try again"
+                job.wait_for_user = False
+                save_jobs()
+                await broadcast_job_update(job)
+                return
+            except Exception as e:
+                job.status = JobStatus.ERROR
+                job.error = f"Failed to generate synopsis: {str(e)}"
+                job.wait_for_user = False
+                save_jobs()
+                await broadcast_job_update(job)
+                logger.error(f"Synopsis generation failed for job {job.job_id}: {e}")
+                return
 
         # For custom mode, synopsis is the input text itself
         if job.mode == "custom":
@@ -146,18 +159,47 @@ async def process_job(job):
                 f"Respond with ONLY the synopsis text, nothing else.\n\n"
                 f"Story text:\n{job.input_text}"
             )
-            synopsis = await loop.run_in_executor(
-                None, lambda: global_state.text_gen.generate(prompt, max_tokens=500)
-            )
-            job.input_text = synopsis
-            logger.info(f"Extracted synopsis from full story: {synopsis}")
+            try:
+                synopsis = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, lambda: global_state.text_gen.generate(prompt, max_tokens=500)
+                    ),
+                    timeout=30.0
+                )
+                job.input_text = synopsis
+                logger.info(f"Extracted synopsis from full story: {synopsis}")
+            except asyncio.TimeoutError:
+                job.status = JobStatus.ERROR
+                job.error = "Synopsis extraction timed out - please try again"
+                job.wait_for_user = False
+                save_jobs()
+                await broadcast_job_update(job)
+                return
+            except Exception as e:
+                job.status = JobStatus.ERROR
+                job.error = f"Failed to extract synopsis: {str(e)}"
+                job.wait_for_user = False
+                save_jobs()
+                await broadcast_job_update(job)
+                logger.error(f"Synopsis extraction failed for job {job.job_id}: {e}")
+                return
 
         # Generate a title from the synopsis
         logger.info(f"Generating title for job {job.job_id}...")
-        title = await loop.run_in_executor(
-            None, global_state.text_gen.generate_title, job.input_text
-        )
-        logger.info(f"Generated title: {title}")
+        try:
+            title = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, global_state.text_gen.generate_title, job.input_text
+                ),
+                timeout=15.0
+            )
+            logger.info(f"Generated title: {title}")
+        except asyncio.TimeoutError:
+            title = "Untitled Story"
+            logger.warning(f"Title generation timed out for job {job.job_id}, using default")
+        except Exception as e:
+            title = "Untitled Story"
+            logger.warning(f"Title generation failed for job {job.job_id}: {e}, using default")
 
         # ========================================
         # STEP 2: Show synopsis for user confirmation (NO panels yet)
@@ -209,13 +251,32 @@ async def process_job(job):
         job.progress_total = 1
         await broadcast_job_update(job)
 
-        story = await loop.run_in_executor(
-            None, lambda: global_state.text_gen.generate_reference_profile(job.input_text, title)
-        )
-        job.story = story
-        logger.info(f"Reference profile generated: {story.title} ({len(story.panels)} panels)")
-        await broadcast_job_update(job)
-        save_jobs()
+        try:
+            story = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: global_state.text_gen.generate_reference_profile(job.input_text, title)
+                ),
+                timeout=30.0
+            )
+            job.story = story
+            logger.info(f"Reference profile generated: {story.title} ({len(story.panels)} panels)")
+            await broadcast_job_update(job)
+            save_jobs()
+        except asyncio.TimeoutError:
+            job.status = JobStatus.ERROR
+            job.error = "Reference profile generation timed out - please try again"
+            job.wait_for_user = False
+            save_jobs()
+            await broadcast_job_update(job)
+            return
+        except Exception as e:
+            job.status = JobStatus.ERROR
+            job.error = f"Failed to generate reference profile: {str(e)}"
+            job.wait_for_user = False
+            save_jobs()
+            await broadcast_job_update(job)
+            logger.error(f"Reference profile generation failed for job {job.job_id}: {e}")
+            return
 
         # ========================================
         # STEP 3: WAIT for user to proceed to style/reference
@@ -299,7 +360,9 @@ async def process_job(job):
                 return
 
             log_system_resources(f"JOB-{job.job_id}-PANEL-{panel.index}")
-            def generate_single_panel(p=panel):
+            
+            # Use a closure to capture panel reference properly
+            def generate_single_panel(p):
                 gen_w, gen_h = _panel_gen_dims(p.index)
                 p.image = global_state.img_gen.generate(
                     prompt=_panel_prompt(story, p),
@@ -308,8 +371,28 @@ async def process_job(job):
                     reference_image=story.master_reference,
                     seed=panel_seed(story, p.index),
                 )
+            
+            try:
+                # Add timeout for panel generation (90 seconds per panel)
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, generate_single_panel, panel),
+                    timeout=90.0
+                )
+            except asyncio.TimeoutError:
+                job.status = JobStatus.ERROR
+                job.error = f"Panel {panel.index + 1} generation timed out - please try again"
+                save_jobs()
+                await broadcast_job_update(job)
+                logger.error(f"Panel {panel.index + 1} generation timed out for job {job.job_id}")
+                return
+            except Exception as e:
+                job.status = JobStatus.ERROR
+                job.error = f"Failed to generate panel {panel.index + 1}: {str(e)}"
+                save_jobs()
+                await broadcast_job_update(job)
+                logger.error(f"Panel {panel.index + 1} generation failed for job {job.job_id}: {e}")
+                return
 
-            await loop.run_in_executor(None, generate_single_panel)
             job.progress_current += 1
 
             # Brief breather between inference jobs
@@ -342,6 +425,5 @@ async def process_job(job):
 
 __all__ = [
     "_load_models",
-    "job_worker",
     "process_job",
 ]

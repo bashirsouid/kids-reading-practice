@@ -14,12 +14,10 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .config import STATIC_DIR, file_handler
-from .models import JobStatus
 from . import state as global_state
 from .persistence import load_jobs
-from .jobs import job_worker, _load_models
+from .jobs import _load_models
 from .api.routes import router
-from .utils import log_system_resources
 
 logger = logging.getLogger("comic-server")
 
@@ -29,14 +27,9 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan event handler for model loading and job worker."""
+    """Lifespan event handler for model loading."""
     # Load jobs from disk
     load_jobs()
-
-    # Start background worker
-    logger.info("Starting background job worker...")
-    worker_task = asyncio.create_task(job_worker())
-    log_system_resources("STARTUP")
 
     # Load models in a background thread
     global_state.models_loading = True
@@ -46,11 +39,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Cleanup
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    pass
 
 
 # ── App Setup ────────────────────────────────────────────────────────────────

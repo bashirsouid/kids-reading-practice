@@ -43,6 +43,21 @@ function compactCharAnchor(c: { name: string; description: string }, max = 260):
   return `${c.name}: ${(sp > max / 2 ? cut.slice(0, sp) : cut)}...`;
 }
 
+const PRESET_STYLES = [
+  'Modern Pixar 3D animation style',
+  'Classic hand-drawn style',
+  'Watercolor painting style',
+  'Japanese anime style',
+  'Marvel comic book style',
+  'Disney traditional animation style',
+  'Studio Ghibli style',
+  'Low poly 3D style',
+  'Pixel art style',
+  'Claymation stop motion style',
+  'Ink and brush style',
+  'Pop art style',
+];
+
 export function StyleReferencePage() {
   const navigate = useNavigate();
   const { state, dispatch } = useWizard();
@@ -119,6 +134,50 @@ export function StyleReferencePage() {
     dispatch({ type: 'SET_PAGE', payload: 'styleReference' });
   }, []);
 
+  // Auto-select first style if none is set, and auto-generate reference on first load
+  useEffect(() => {
+    const initializeStyleAndGenerate = async () => {
+      // Determine the style to use (prefer existing art_style, otherwise use first preset)
+      const styleToUse = state.story?.art_style || PRESET_STYLES[0];
+      
+      // If no art style is set, use the first preset style
+      if (!state.story?.art_style && PRESET_STYLES.length > 0) {
+        const firstStyle = PRESET_STYLES[0];
+        setArtStyle(firstStyle);
+        if (state.jobId && state.story) {
+          dispatch({
+            type: 'UPDATE_STORY_FIELD',
+            payload: { field: 'art_style', value: firstStyle }
+          });
+          try {
+            await updateArtStyle(state.jobId, firstStyle);
+          } catch (err) {
+            console.error('Failed to auto-set art style', err);
+          }
+        }
+      }
+      
+      // Auto-generate reference if no reference exists and not already generating
+      if (!hasReference && !isGeneratingRef && state.jobId) {
+        setIsGeneratingRef(true);
+        setHasReference(false);
+        setRefProgress(null);
+        setError(null);
+        try {
+          await updateArtStyle(state.jobId, styleToUse);
+          await updateStorySetting(state.jobId, storySetting);
+          await generateMasterReference(state.jobId);
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : 'Failed to generate reference';
+          setError(errorMessage);
+          setIsGeneratingRef(false);
+        }
+      }
+    };
+    
+    initializeStyleAndGenerate();
+  }, []); // Run once on mount
+
   // Listen for WebSocket updates for this job
   useWebSocket({
     jobId: state.jobId || '',
@@ -127,7 +186,6 @@ export function StyleReferencePage() {
     },
     onReferenceReady: () => {
       // Master reference is ready - the WebSocket indicates has_reference is true
-      // or the stage has moved to panel_breakdown
       setHasReference(true);
       setIsGeneratingRef(false);
       setRefProgress(null);

@@ -65,6 +65,10 @@ JOBS_FILE = OUTPUT_DIR / "jobs.json"
 JOB_ASSETS_DIR = OUTPUT_DIR / "jobs"
 JOB_ASSETS_DIR.mkdir(exist_ok=True)
 
+# ── Image Generation Configuration ────────────────────────────────────────────
+# Number of concurrent workers for panel image generation (1-6, default 6 for testing)
+IMAGE_GEN_CONCURRENCY = max(1, min(6, int(os.getenv("IMAGE_GEN_CONCURRENCY", "6"))))
+
 # Export file_handler for use in main.py
 __all__ = [
     "LOG_DIR",
@@ -78,4 +82,5 @@ __all__ = [
     "OUTPUT_DIR",
     "JOBS_FILE",
     "JOB_ASSETS_DIR",
+    "IMAGE_GEN_CONCURRENCY",
 ]

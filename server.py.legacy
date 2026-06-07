@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -170,6 +171,7 @@ class ComicJob:
     cancel_requested: bool = False
     stage: str = "input"  # input, synopsis, story, reference, panel_breakdown, panels, complete, error
     wait_for_user: bool = False  # Pause and wait for user to click "Next"
+    synopsis_seed: Optional[int] = None
 
 
 # In-memory job store
@@ -280,6 +282,24 @@ def _load_job_images(job: ComicJob):
                 panel.image = img.copy()
 
 
+def _delete_job_assets(job_id: str) -> bool:
+    """Delete all persisted assets for a job.
+    
+    Removes the job's asset directory and all files within it.
+    Returns True if deletion succeeded, False otherwise.
+    """
+    assets_dir = JOB_ASSETS_DIR / job_id
+    if assets_dir.exists():
+        try:
+            shutil.rmtree(assets_dir)
+            logger.info(f"Deleted assets for job {job_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete assets for job {job_id}: {e}")
+            return False
+    return True  # Already doesn't exist, consider success
+
+
 # ── Pydantic Models ──────────────────────────────────────────────────────────
 class GenerateRequest(BaseModel):
     mode: str  # "random", "themed", "custom"
@@ -331,6 +351,7 @@ class UpdatePanelRequest(BaseModel):
     panel_index: int
     caption: Optional[str] = None
     image_prompt: Optional[str] = None
+    characters: Optional[list] = None
 
 
 class UpdatePanelsRequest(BaseModel):
@@ -419,11 +440,13 @@ async def process_job(job: ComicJob):
             await broadcast_job_update(job)
 
             theme = job.input_text if job.mode == "themed" else None
+            seed = int.from_bytes(os.urandom(4), "big")
             synopsis = await loop.run_in_executor(
-                None, text_gen.generate_random_synopsis, theme
+                None, text_gen.generate_random_synopsis, theme, seed
             )
+            job.synopsis_seed = seed
             job.input_text = synopsis
-            logger.info(f"Generated synopsis: {synopsis}")
+            logger.info(f"Generated synopsis with seed {seed}: {synopsis[:50]}...")
         
         # For custom mode, synopsis is the input text itself
         if job.mode == "custom":
@@ -1038,6 +1061,28 @@ async def api_cancel(job_id: str):
     return {"status": "cancelled"}
 
 
+@app.delete("/api/project/{slug}")
+async def api_delete_project(slug: str):
+    """Delete a project and all its assets."""
+    job = _find_job(slug)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_id = job.job_id
+    
+    # Delete assets directory first
+    _delete_job_assets(job_id)
+    
+    # Remove job from memory
+    del jobs[job_id]
+    
+    # Persist changes
+    save_jobs()
+    
+    logger.info(f"Deleted project {slug} (job_id: {job_id})")
+    return {"status": "deleted", "slug": slug}
+
+
 @app.post("/api/regenerate-panel")
 async def api_regenerate_panel(req: RegeneratePanelRequest):
     """Regenerate a single panel."""
@@ -1425,6 +1470,19 @@ async def api_proceed_to_next_stage(job_id: str):
         if not job.story or not job.story.panels:
             raise HTTPException(status_code=400, detail="Panel breakdown has not been generated yet")
         job.stage = "panels"
+    elif job.stage == "panels":
+        # When user clicks Next at the panels stage, check if all non-placeholder panels have images
+        if not job.story or not job.story.panels:
+            raise HTTPException(status_code=400, detail="Panel breakdown has not been generated yet")
+        all_panels_done = all(
+            p.image is not None for p in job.story.panels if not p.is_placeholder
+        )
+        if not all_panels_done:
+            raise HTTPException(status_code=400, detail="Panel images not generated yet - please generate all panel images first")
+        job.stage = "complete"
+        job.status = JobStatus.COMPLETE
+        save_jobs()
+        await broadcast_job_update(job)
 
     job.wait_for_user = False
     logger.info(f"Job {job_id}: user requested to proceed from stage '{job.stage}'")
@@ -1447,15 +1505,15 @@ async def api_update_panel(req: UpdatePanelRequest):
         panel.caption = req.caption
     if req.image_prompt is not None:
         panel.image_prompt = req.image_prompt
+    if req.characters is not None:
+        panel.characters = req.characters
     
     # Clear placeholder flag if panel has real content (not just placeholders)
     if panel.is_placeholder:
-        # Check if the content is no longer placeholder text
-        is_still_placeholder = (
-            (not panel.caption or panel.caption.startswith("[Placeholder")) or
-            (not panel.image_prompt or panel.image_prompt.startswith("[Placeholder"))
-        )
-        if not is_still_placeholder:
+        # Check if both required fields have real content (not placeholder or empty)
+        has_real_caption = panel.caption and not panel.caption.startswith("[Placeholder")
+        has_real_image_prompt = panel.image_prompt and not panel.image_prompt.startswith("[Placeholder")
+        if has_real_caption and has_real_image_prompt:
             panel.is_placeholder = False
             logger.info(f"Cleared placeholder flag for panel {req.panel_index + 1}")
     
@@ -1486,11 +1544,10 @@ async def api_update_panels(req: UpdatePanelsRequest):
             panel.is_placeholder = panel_data["is_placeholder"]
         else:
             # Auto-detect if panel is still placeholder based on content
-            is_still_placeholder = (
-                (not panel.caption or panel.caption.startswith("[Placeholder")) or
-                (not panel.image_prompt or panel.image_prompt.startswith("[Placeholder"))
-            )
-            panel.is_placeholder = is_still_placeholder
+            # A panel is a placeholder if either caption OR image_prompt is empty/placeholder
+            has_real_caption = panel.caption and not panel.caption.startswith("[Placeholder")
+            has_real_image_prompt = panel.image_prompt and not panel.image_prompt.startswith("[Placeholder")
+            panel.is_placeholder = not (has_real_caption and has_real_image_prompt)
     
     logger.info(f"Updated {len(req.panels)} panels for job {req.job_id}")
     save_jobs()
@@ -1531,8 +1588,19 @@ async def export_comic(job_id: str):
     if not job or not job.story:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.status != JobStatus.COMPLETE:
-        raise HTTPException(status_code=400, detail="Job not complete yet")
+    # Allow export if job is complete OR all non-placeholder panels have images
+    all_panels_done = job.story and all(
+        p.image is not None for p in job.story.panels if not p.is_placeholder
+    )
+    if job.status != JobStatus.COMPLETE and job.stage != "complete" and not all_panels_done:
+        raise HTTPException(status_code=400, detail="Job not complete yet - panel images are still being generated")
+
+    # If panels are done but status isn't COMPLETE, update it now
+    if all_panels_done and job.status != JobStatus.COMPLETE:
+        job.stage = "complete"
+        job.status = JobStatus.COMPLETE
+        save_jobs()
+        await broadcast_job_update(job)
 
     # Render the final page
     page = render_page(job.story)

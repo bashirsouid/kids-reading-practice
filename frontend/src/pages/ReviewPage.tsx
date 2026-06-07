@@ -1,10 +1,10 @@
 /**
  * ReviewPage - Step 6: Final review with export options.
- * 
+ *
  * Purpose: Display final comic panels with export options (PNG).
  * Provides navigation back to previous step for edits.
  * Supports per-panel regeneration progress display.
- * 
+ *
  * Route: /review
  */
 import React, { useState, useEffect, useCallback } from 'react';
@@ -22,9 +22,11 @@ export function ReviewPage() {
   const { state, dispatch } = useWizard();
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-  /** Per-panel generation state for regeneration progress. */
   const [generatingPanels, setGeneratingPanels] = useState<Record<number, PanelGenerationProgress | true>>({});
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isComplete, setIsComplete] = useState(false);
+  const [panelCacheKeys, setPanelCacheKeys] = useState<Record<number, number>>({});
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'review' });
@@ -32,7 +34,9 @@ export function ReviewPage() {
 
   const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
     if (target === 'panel' && panelIndex !== null) {
+      setPanelCacheKeys(prev => ({ ...prev, [panelIndex]: Date.now() }));
       setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
+      setIsGenerating(true);
     }
   }, []);
 
@@ -45,33 +49,49 @@ export function ReviewPage() {
     }
   }, []);
 
-  // Listen for regeneration updates
   useWebSocket({
     jobId: state.jobId || '',
-    onStoryUpdate: (storyUpdate) => {
-      if (!storyUpdate) return;
-      dispatch({
-        type: 'SET_STORY',
-        payload: {
-          ...(state.story || {}),
-          ...storyUpdate,
-        },
-      });
-      // Clear generating state for panels that now have images
-      if (storyUpdate.panels) {
-        setGeneratingPanels(prev => {
-          const next = { ...prev };
-          for (const p of storyUpdate.panels!) {
-            if (p.has_image && next[p.index] !== undefined) {
-              delete next[p.index];
-            }
-          }
-          return next;
-        });
+    onStageChange: (stage) => {
+      if (stage === 'complete') {
+        setIsGenerating(false);
+        setIsComplete(true);
+        setGeneratingPanels({});
       }
+    },
+    onError: (msg) => {
+      setIsGenerating(false);
+      setGeneratingPanels({});
     },
     onImageGenerating: handleImageGenerating,
     onImageProgress: handleImageProgress,
+    onStoryUpdate: (storyUpdate) => {
+      if (!storyUpdate?.panels) return;
+      const currentPanels = state.story?.panels;
+      if (!currentPanels || currentPanels.length === 0) return;
+
+      const updatedPanelIndices = storyUpdate.panels
+        .filter(p => p.has_image)
+        .map(p => p.index);
+
+      if (updatedPanelIndices.length === 0) return;
+
+      setPanelCacheKeys(prev => {
+        const next = { ...prev };
+        for (const idx of updatedPanelIndices) {
+          next[idx] = Date.now();
+        }
+        return next;
+      });
+      setGeneratingPanels(prev => {
+        const next = { ...prev };
+        for (const idx of updatedPanelIndices) {
+          if (next[idx] !== undefined) {
+            delete next[idx];
+          }
+        }
+        return next;
+      });
+    },
   });
 
   const handleExportPNG = () => {
@@ -84,11 +104,10 @@ export function ReviewPage() {
     const panels = state.story?.panels || [];
     const panel = panels[index];
     if (panel?.has_image && state.jobId) {
-      setLightboxUrl(getPanelImageUrl(state.jobId, index));
+      const cacheKey = panelCacheKeys[index];
+      setLightboxUrl(getPanelImageUrl(state.jobId, index) + (cacheKey ? `?t=${cacheKey}` : ''));
     }
   };
-
-
 
   const handleBack = () => {
     navigate(projectPath('panelImages'));
@@ -125,6 +144,8 @@ export function ReviewPage() {
             panels={state.story.panels}
             jobId={state.jobId}
             generatingPanels={generatingPanels}
+            panelCacheKeys={panelCacheKeys}
+            showImageStatus={false}
             onPanelClick={handlePanelClick}
           />
         )}

@@ -4,6 +4,7 @@ persistence.py — Job save/load and image persistence functions.
 
 import json
 import logging
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -124,8 +125,27 @@ def _load_job_images(job: ComicJob):
                 panel.image = img.copy()
 
 
+def delete_job_assets(job_id: str) -> bool:
+    """Delete all persisted assets for a job.
+    
+    Removes the job's asset directory and all files within it.
+    Returns True if deletion succeeded, False otherwise.
+    """
+    assets_dir = JOB_ASSETS_DIR / job_id
+    if assets_dir.exists():
+        try:
+            shutil.rmtree(assets_dir)
+            logger.info(f"Deleted assets for job {job_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete assets for job {job_id}: {e}")
+            return False
+    return True  # Already doesn't exist, consider success
+
+
 __all__ = [
     "save_jobs",
     "load_jobs",
     "_job_assets_dir",
+    "delete_job_assets",
 ]

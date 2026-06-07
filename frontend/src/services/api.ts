@@ -153,14 +153,31 @@ export async function getJobStatus(jobId: string): Promise<{
   return handleResponse(response);
 }
 
-export async function regeneratePanel(jobId: string, panelIndex: number, modification?: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/regenerate-panel`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId, panel_index: panelIndex, modification: modification || '' }),
-  });
-  return handleResponse(response);
+export async function updatePanel(jobId: string, panelIndex: number, data: {
+    caption?: string;
+    image_prompt?: string;
+    characters?: string[];
+}): Promise<void> {
+    const response = await fetch(`${API_BASE}/update-panel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            job_id: jobId,
+            panel_index: panelIndex,
+            ...data,
+        }),
+    });
+    return handleResponse(response);
 }
+
+export async function regeneratePanel(jobId: string, panelIndex: number, modification?: string): Promise<void> {
+   const response = await fetch(`${API_BASE}/regenerate-panel`, {
+     method: 'POST',
+     headers: { 'Content-Type': 'application/json' },
+     body: JSON.stringify({ job_id: jobId, panel_index: panelIndex, modification: modification || '' }),
+   });
+   return handleResponse(response);
+ }
 
  export async function updatePanels(jobId: string, panels: unknown[]): Promise<void> {
   const response = await fetch(`${API_BASE}/update-panels`, {
@@ -193,6 +210,13 @@ export async function loadProject(slug: string): Promise<{
   error?: string | null;
 }> {
   const response = await fetch(`${API_BASE}/status/slug/${slug}`);
+  return handleResponse(response);
+}
+
+export async function deleteProject(slug: string): Promise<{ status: string; slug: string }> {
+  const response = await fetch(`${API_BASE}/project/${slug}`, {
+    method: 'DELETE',
+  });
   return handleResponse(response);
 }
 

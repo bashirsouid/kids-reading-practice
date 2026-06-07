@@ -38,6 +38,7 @@ class ComicJob:
     cancel_requested: bool = False
     stage: str = "input"  # input, synopsis, story, reference, panel_breakdown, panels, complete, error
     wait_for_user: bool = False  # Pause and wait for user to click "Next"
+    synopsis_seed: Optional[int] = None
 
 
 # ── Pydantic Request Models ──────────────────────────────────────────────────
@@ -96,6 +97,7 @@ class UpdatePanelRequest(BaseModel):
     panel_index: int
     caption: Optional[str] = None
     image_prompt: Optional[str] = None
+    characters: Optional[list[str]] = None
 
 
 class UpdatePanelsRequest(BaseModel):

@@ -8,9 +8,22 @@ import logging
 from typing import Optional
 
 from . import state as global_state
-from .utils import _make_project_slug
 
 logger = logging.getLogger("comic-server")
+
+
+async def _get_ws_list(job_id: str) -> list:
+    """Thread-safe getter for websocket list."""
+    async with global_state._ws_lock:
+        return list(global_state.active_websockets.get(job_id, []))
+
+
+async def _remove_ws(job_id: str, ws) -> None:
+    """Thread-safe removal of websocket from list."""
+    async with global_state._ws_lock:
+        ws_list = global_state.active_websockets.get(job_id, [])
+        if ws in ws_list:
+            ws_list.remove(ws)
 
 
 async def broadcast_image_generating(job, target: str, panel_index: Optional[int] = None):
@@ -22,7 +35,7 @@ async def broadcast_image_generating(job, target: str, panel_index: Optional[int
         "panel_index": panel_index,
     }
     message = json.dumps(data)
-    ws_list = global_state.active_websockets.get(job.job_id, [])
+    ws_list = await _get_ws_list(job.job_id)
     disconnected = []
     for ws in ws_list:
         try:
@@ -30,7 +43,7 @@ async def broadcast_image_generating(job, target: str, panel_index: Optional[int
         except Exception:
             disconnected.append(ws)
     for ws in disconnected:
-        ws_list.remove(ws)
+        await _remove_ws(job.job_id, ws)
 
 
 async def broadcast_image_progress(job, target: str, step: int, total_steps: int, panel_index: Optional[int] = None):
@@ -44,7 +57,7 @@ async def broadcast_image_progress(job, target: str, step: int, total_steps: int
         "total_steps": total_steps,
     }
     message = json.dumps(data)
-    ws_list = global_state.active_websockets.get(job.job_id, [])
+    ws_list = await _get_ws_list(job.job_id)
     disconnected = []
     for ws in ws_list:
         try:
@@ -52,21 +65,29 @@ async def broadcast_image_progress(job, target: str, step: int, total_steps: int
         except Exception:
             disconnected.append(ws)
     for ws in disconnected:
-        ws_list.remove(ws)
+        await _remove_ws(job.job_id, ws)
 
 
-def _make_step_callback(job, target: str, panel_index: Optional[int] = None):
+def _make_step_callback(job_id: str, target: str, panel_index: Optional[int] = None):
     """Create a thread-safe step callback for image generation.
 
     The callback is invoked from executor threads, so it dispatches
     the WebSocket broadcast back to the event loop via
     asyncio.run_coroutine_threadsafe.
+    
+    Uses job_id instead of job object to avoid stale references.
     """
     loop = asyncio.get_event_loop()
 
+    async def do_broadcast(step: int, total_steps: int):
+        """Internal async function to get fresh job from state and broadcast."""
+        job = global_state.jobs.get(job_id)
+        if job:
+            await broadcast_image_progress(job, target, step, total_steps, panel_index)
+
     def step_cb(step: int, total_steps: int):
         asyncio.run_coroutine_threadsafe(
-            broadcast_image_progress(job, target, step, total_steps, panel_index),
+            do_broadcast(step, total_steps),
             loop,
         )
 
@@ -137,8 +158,8 @@ async def broadcast_job_update(job):
 
     message = json.dumps(data)
 
-    # Broadcast to all connected clients for this job
-    ws_list = global_state.active_websockets.get(job.job_id, [])
+    # Broadcast to all connected clients for this job (thread-safe)
+    ws_list = await _get_ws_list(job.job_id)
     disconnected = []
     for ws in ws_list:
         try:
@@ -146,14 +167,15 @@ async def broadcast_job_update(job):
         except Exception:
             disconnected.append(ws)
     for ws in disconnected:
-        ws_list.remove(ws)
+        await _remove_ws(job.job_id, ws)
 
 
 def _get_queue_position(job_id: str) -> int:
-    """Get the position of a job in the queue (0 = currently processing)."""
-    queued_ids = list(global_state.job_queue._queue)
-    if job_id in queued_ids:
-        return queued_ids.index(job_id) + 1
+    """Get the position of a job in the queue (0 = currently processing).
+    
+    Since we removed the queue, this always returns 0.
+    Kept for backwards compatibility.
+    """
     return 0
 
 

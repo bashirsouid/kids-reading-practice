@@ -12,6 +12,7 @@ import random
 import re
 import logging
 import base64
+import concurrent.futures
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, Union, List
@@ -21,6 +22,9 @@ from io import BytesIO
 
 import httpx
 from PIL import Image, ImageDraw, ImageFont
+
+# Import config for parallelization settings
+from backend.config import IMAGE_GEN_CONCURRENCY
 
 logger = logging.getLogger("comic-generator")
 
@@ -122,6 +126,7 @@ class TextGenerator:
 
     def _call_api(self, messages: list[dict], max_tokens: int, temperature: float) -> str:
         """Call OpenRouter chat completion endpoint, trying primary then fallback."""
+        import httpx
         for model in [self.primary_model, self.fallback_model]:
             if not model:
                 continue
@@ -139,8 +144,13 @@ class TextGenerator:
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                 }
-                response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
-                response.raise_for_status()
+                # Use explicit timeout with TimeoutException handling
+                try:
+                    response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
+                    response.raise_for_status()
+                except httpx.TimeoutException:
+                    logger.warning(f"OpenRouter model {model} timed out")
+                    continue
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
                 self._active_model = model
@@ -221,8 +231,10 @@ class TextGenerator:
                     )
         raise ValueError("Reference profile generation failed")
 
-    def generate_random_synopsis(self, theme: Optional[str] = None) -> str:
+    def generate_random_synopsis(self, theme: Optional[str] = None, seed: Optional[int] = None) -> str:
         """Generate a longer random story synopsis (5-8 sentences)."""
+        if seed is not None:
+            random.seed(seed)
         if theme:
             prompt = (
                 "Generate a fun children's comic book synopsis (5-8 sentences) about the theme: '"
@@ -579,7 +591,6 @@ class ImageGenerator:
 
     def __init__(self, model_id: str = IMAGE_MODEL_ID):
         self.model_id = model_id
-        self._lock = threading.Lock()
 
     def load(self):
         """Validate that the OpenRouter API key is present."""
@@ -615,115 +626,114 @@ class ImageGenerator:
         Returns:
             PIL Image object
         """
-        with self._lock:
-            self.load()
+        self.load()
 
-            if seed is None:
-                seed = int.from_bytes(os.urandom(4), "big")
+        if seed is None:
+            seed = int.from_bytes(os.urandom(4), "big")
 
-            # Build the request payload for OpenRouter
-            # The riverflow model accepts image generation via chat completions
-            # with special parameters for image output
-            headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "HTTP-Referer": "https://github.com/bashirs/comic-generator",
-                "X-Title": "Comic Generator",
-                "Content-Type": "application/json",
-            }
+        # Build the request payload for OpenRouter
+        # The riverflow model accepts image generation via chat completions
+        # with special parameters for image output
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "HTTP-Referer": "https://github.com/bashirs/comic-generator",
+            "X-Title": "Comic Generator",
+            "Content-Type": "application/json",
+        }
 
-            # Prepare the message content - for image models, we send the prompt
-            messages = [{"role": "user", "content": prompt}]
+        # Prepare the message content - for image models, we send the prompt
+        messages = [{"role": "user", "content": prompt}]
 
-            payload = {
-                "model": self.model_id,
-                "messages": messages,
-                "max_tokens": 1000,
-                # Riverflow is an image-only model - requires modalities parameter
-                "modalities": ["image"],
-            }
-            
-            # Add seed if provided (some models support it)
-            if seed is not None:
-                payload["seed"] = seed
+        payload = {
+            "model": self.model_id,
+            "messages": messages,
+            "max_tokens": 1000,
+            # Riverflow is an image-only model - requires modalities parameter
+            "modalities": ["image"],
+        }
+        
+        # Add seed if provided (some models support it)
+        if seed is not None:
+            payload["seed"] = seed
 
-            # Add image generation parameters
-            # Note: Riverflow v2.5 supports aspect_ratio and image_size via image_config
-            # but for simplicity we use the default 1:1 aspect ratio at 1K resolution
-            # If specific dimensions are needed, we can add image_config later
+        # Add image generation parameters
+        # Note: Riverflow v2.5 supports aspect_ratio and image_size via image_config
+        # but for simplicity we use the default 1:1 aspect ratio at 1K resolution
+        # If specific dimensions are needed, we can add image_config later
 
-            logger.info(f"Calling OpenRouter image model {self.model_id} (size={width}x{height}, seed={seed})")
+        logger.info(f"Calling OpenRouter image model {self.model_id} (size={width}x{height}, seed={seed})")
 
-            # Make the API call
-            response = httpx.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=180.0,
-            )
-            response.raise_for_status()
-            data = response.json()
+        # Make the API call
+        response = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=270.0,
+        )
+        response.raise_for_status()
+        data = response.json()
 
-            # Parse the response - OpenRouter image models return images
-            # in message.images array with base64 data URLs
-            # Format: {"images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}
-            message = data["choices"][0]["message"]
-            images = message.get("images", [])
-            
-            img_data = None
-            
-            if images:
-                # Primary: extract from images array (OpenRouter image model format)
-                image_url = images[0].get("image_url", {}).get("url", "")
-                if isinstance(image_url, str) and image_url.startswith("data:image"):
-                    # Extract base64 data after the comma
-                    b64_data = image_url.split(",")[1]
-                    img_data = base64.b64decode(b64_data)
-                elif isinstance(image_url, str) and image_url.startswith("http"):
-                    # It's a URL - fetch the image
-                    img_response = httpx.get(image_url, timeout=60.0)
-                    img_response.raise_for_status()
-                    img_data = img_response.content
-                else:
-                    # Try to decode as raw base64
-                    try:
-                        img_data = base64.b64decode(image_url)
-                    except Exception:
-                        raise RuntimeError(f"Unexpected image URL format: {image_url[:200]}")
+        # Parse the response - OpenRouter image models return images
+        # in message.images array with base64 data URLs
+        # Format: {"images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}
+        message = data["choices"][0]["message"]
+        images = message.get("images", [])
+        
+        img_data = None
+        
+        if images:
+            # Primary: extract from images array (OpenRouter image model format)
+            image_url = images[0].get("image_url", {}).get("url", "")
+            if isinstance(image_url, str) and image_url.startswith("data:image"):
+                # Extract base64 data after the comma
+                b64_data = image_url.split(",")[1]
+                img_data = base64.b64decode(b64_data)
+            elif isinstance(image_url, str) and image_url.startswith("http"):
+                # It's a URL - fetch the image
+                img_response = httpx.get(image_url, timeout=90.0)
+                img_response.raise_for_status()
+                img_data = img_response.content
             else:
-                # Fallback: check if content has base64 data (legacy format)
-                content = message.get("content")
-                if isinstance(content, str) and content.startswith("data:image"):
-                    b64_data = content.split(",")[1]
-                    img_data = base64.b64decode(b64_data)
-                elif isinstance(content, str) and content.startswith("http"):
-                    img_response = httpx.get(content, timeout=60.0)
-                    img_response.raise_for_status()
-                    img_data = img_response.content
-                elif content is not None:
-                    try:
-                        img_data = base64.b64decode(content)
-                    except Exception:
-                        pass
-                
-                if img_data is None:
-                    raise RuntimeError(
-                        f"Unexpected image response format - no images in response. "
-                        f"Message: {message}"
-                    )
-
-            # Load the image using PIL
-            img = Image.open(BytesIO(img_data))
-            img = img.convert("RGB")
+                # Try to decode as raw base64
+                try:
+                    img_data = base64.b64decode(image_url)
+                except Exception:
+                    raise RuntimeError(f"Unexpected image URL format: {image_url[:200]}")
+        else:
+            # Fallback: check if content has base64 data (legacy format)
+            content = message.get("content")
+            if isinstance(content, str) and content.startswith("data:image"):
+                b64_data = content.split(",")[1]
+                img_data = base64.b64decode(b64_data)
+            elif isinstance(content, str) and content.startswith("http"):
+                img_response = httpx.get(content, timeout=90.0)
+                img_response.raise_for_status()
+                img_data = img_response.content
+            elif content is not None:
+                try:
+                    img_data = base64.b64decode(content)
+                except Exception:
+                    pass
             
-            # Resize to requested dimensions if needed
-            if img.width != width or img.height != height:
-                img = img.resize((width, height), Image.LANCZOS)
+            if img_data is None:
+                raise RuntimeError(
+                    f"Unexpected image response format - no images in response. "
+                    f"Message: {message}"
+                )
 
-            logger.info(
-                f"Image generation complete (seed={seed}): "
-                f"{prompt[:50]}..."
-            )
-            return img
+        # Load the image using PIL
+        img = Image.open(BytesIO(img_data))
+        img = img.convert("RGB")
+        
+        # Resize to requested dimensions if needed
+        if img.width != width or img.height != height:
+            img = img.resize((width, height), Image.LANCZOS)
+
+        logger.info(
+            f"Image generation complete (seed={seed}): "
+            f"{prompt[:50]}..."
+        )
+        return img
 
 
 # - Comic Page Renderer -
@@ -1037,14 +1047,21 @@ def generate_master_reference(
 def generate_all_panels(
     story: ComicStory,
     img_gen: ImageGenerator,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
+    progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ):
-    """Generate images for all panels in a story."""
+    """Generate images for all panels in a story.
+    
+    Args:
+        story: The comic story containing panels to generate
+        img_gen: ImageGenerator instance to use
+        progress_callback: Called with (panel_idx, completed, total) as each panel finishes
+    """
     if story.master_reference is None:
         generate_master_reference(story, img_gen)
 
     total = len(story.panels)
-    for panel in story.panels:
+    
+    def generate_panel(panel: Panel):
         gen_w, gen_h = _panel_gen_dims(panel.index)
         full_prompt = _panel_prompt(story, panel)
         logger.info("Generating panel " + str(panel.index + 1) + "/" + str(total) + ": " + full_prompt[:80] + "...")
@@ -1056,9 +1073,21 @@ def generate_all_panels(
             reference_image=story.master_reference,
             seed=panel_seed(story, panel.index),
         )
+        return panel.index
 
-        if progress_callback:
-            progress_callback(panel.index + 1, total)
+    # Use ThreadPoolExecutor for parallel panel generation
+    # IMAGE_GEN_CONCURRENCY is clamped between 1-6 in config
+    with concurrent.futures.ThreadPoolExecutor(max_workers=IMAGE_GEN_CONCURRENCY) as executor:
+        # Submit all panel generation tasks
+        future_to_panel = {executor.submit(generate_panel, panel): panel for panel in story.panels}
+        
+        # Process completed tasks as they finish
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_panel):
+            panel_idx = future.result()
+            completed += 1
+            if progress_callback:
+                progress_callback(panel_idx, completed, total)
 
 
 def regenerate_panel(

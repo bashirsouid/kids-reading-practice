@@ -7,9 +7,11 @@ from typing import Optional
 
 from .models import ComicJob
 
+# Thread-safe lock for websocket operations
+_ws_lock = asyncio.Lock()
+
 # In-memory job store
 jobs: dict[str, ComicJob] = {}
-job_queue: asyncio.Queue = asyncio.Queue()
 active_websockets: dict[str, list] = {}
 
 # Model instances (loaded once at startup)
@@ -20,8 +22,8 @@ models_loading = False
 
 __all__ = [
     "jobs",
-    "job_queue",
     "active_websockets",
+    "_ws_lock",  # Export the lock for thread-safe websocket access
     "text_gen",
     "img_gen",
     "models_loaded",

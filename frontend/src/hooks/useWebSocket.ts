@@ -175,13 +175,8 @@ export function useWebSocket({
         }
 
         // Handle stage changes for completion detection
-        if (data.stage === 'panel_breakdown' && onReferenceReady) {
-          // Reference has been generated, moving to panel breakdown
-          onReferenceReady();
-        }
-        
-        // Panel generation complete (stage moved to complete)
         if (data.stage === 'complete' && onReferenceReady) {
+          // Panel generation complete
           onReferenceReady();
         }
       } catch (e) {

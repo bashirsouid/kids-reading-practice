@@ -10,10 +10,11 @@
  *
  * Note: This step generates the actual panel images. Next should only proceed after images ready.
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { proceedToNextStage, generatePanels, regeneratePanel, getJobStatus, getPanelImageUrl } from '../services/api';
+import { proceedToNextStage, generatePanels, regeneratePanel, getJobStatus, getPanelImageUrl, updatePanel } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { Button } from '../components/ui/Button';
 import { ProgressBar } from '../components/ui/ProgressBar';
@@ -35,32 +36,21 @@ export function PanelImagesPage() {
   const [modalPanelIndex, setModalPanelIndex] = useState<number | null>(null);
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-  /** Per-panel generation state: maps panel index to progress or true (started, no steps yet). */
   const [generatingPanels, setGeneratingPanels] = useState<Record<number, PanelGenerationProgress | true>>({});
+  const [panelCacheKeys, setPanelCacheKeys] = useState<Record<number, number>>({});
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'panelImages' });
   }, []);
 
-const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
-     if (target === 'panel' && panelIndex !== null) {
-       // Blank out the old panel image and show generating overlay
-       setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
-       // Mark the panel as not having an image in the story state
-       if (state.story?.panels) {
-         const updatedPanels = state.story.panels.map((p, i) =>
-           i === panelIndex ? { ...p, has_image: false } : p
-         );
-         dispatch({
-           type: 'SET_STORY',
-           payload: { ...state.story, panels: updatedPanels },
-         });
-       }
-       // A panel is being regenerated, so we are no longer complete
-       setIsGenerating(true);
-       setIsComplete(false);
-     }
-   }, [state.story, dispatch]);
+  const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
+    if (target === 'panel' && panelIndex !== null) {
+      setPanelCacheKeys(prev => ({ ...prev, [panelIndex]: Date.now() }));
+      setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
+      setIsGenerating(true);
+      setIsComplete(false);
+    }
+  }, []);
 
   const handleImageProgress = useCallback((target: 'reference' | 'panel', panelIndex: number | null, step: number, totalSteps: number) => {
     if (target === 'panel' && panelIndex !== null) {
@@ -71,43 +61,52 @@ const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelI
     }
   }, []);
 
-  // Listen for WebSocket updates for panel generation progress
   useWebSocket({
     jobId: state.jobId || '',
-onProgress: (current, total) => {
-       setProgress({ current, total });
-       if (total > 0 && current < total) {
-         setIsGenerating(true);
-       }
-     },
-onStoryUpdate: (storyUpdate) => {
-       if (!storyUpdate) return;
-       dispatch({
-         type: 'SET_STORY',
-         payload: {
-           ...(state.story || {}),
-           ...storyUpdate,
-         },
-       });
-       // Clear generating state for panels that now have images
-       if (storyUpdate.panels) {
-         setGeneratingPanels(prev => {
-           const next = { ...prev };
-           for (const p of storyUpdate.panels!) {
-             if (p.has_image && next[p.index] !== undefined) {
-               delete next[p.index];
-             }
-           }
-           return next;
-         });
-         // If all panels now have images, mark complete so the "ready" message shows
-         const allHaveImages = storyUpdate.panels!.every(p => p.has_image);
-         if (allHaveImages) {
-           setIsGenerating(false);
-           setIsComplete(true);
-         }
-       }
-     },
+    onProgress: (current, total) => {
+      setProgress({ current, total });
+      if (total > 0 && current < total) {
+        setIsGenerating(true);
+      }
+    },
+    onStoryUpdate: (storyUpdate) => {
+      if (!storyUpdate?.panels) return;
+
+      const currentPanels = state.story?.panels;
+      // Sync panels from server if we don't have them locally yet, or merge updates
+      if (storyUpdate.panels.length > 0) {
+        const serverPanels = storyUpdate.panels;
+        // Merge has_image flags - update local panels with server state
+        const updatedPanels = (currentPanels?.length ? currentPanels : [...serverPanels]).map(panel => {
+          const serverPanel = serverPanels.find(sp => sp.index === panel.index);
+          if (serverPanel?.has_image) {
+            return { ...panel, has_image: true };
+          }
+          return panel;
+        });
+        dispatch({
+          type: 'SET_STORY',
+          payload: { ...(state.story || {}), panels: updatedPanels },
+        });
+        const completedIndices = serverPanels.filter(sp => sp.has_image).map(sp => sp.index);
+        setPanelCacheKeys(prev => {
+          const next = { ...prev };
+          for (const idx of completedIndices) {
+            next[idx] = Date.now();
+          }
+          return next;
+        });
+        setGeneratingPanels(prev => {
+          const next = { ...prev };
+          for (const idx of completedIndices) {
+            if (next[idx] !== undefined) {
+              delete next[idx];
+            }
+          }
+          return next;
+        });
+      }
+    },
     onStageChange: (stage) => {
       if (stage === 'complete') {
         setIsGenerating(false);
@@ -139,13 +138,42 @@ onStoryUpdate: (storyUpdate) => {
           total: status.progress_total || 6,
         });
 
-        if (status.story) {
+        const currentPanels = state.story?.panels;
+        // Sync panels from server - update has_image flags and load initial panels if needed
+        if (status.story?.panels && status.story.panels.length > 0) {
+          const serverPanels = status.story.panels;
+          // Use existing panels if available, otherwise initialize from server
+          const panelsToUpdate = (currentPanels?.length ? currentPanels : [...serverPanels]).map(panel => {
+            const serverPanel = serverPanels.find(sp => sp.index === panel.index);
+            if (serverPanel?.has_image) {
+              return { ...panel, has_image: true };
+            }
+            return panel;
+          });
           dispatch({
             type: 'SET_STORY',
             payload: {
               ...(state.story || {}),
               ...status.story,
+              panels: panelsToUpdate,
             },
+          });
+          const completedIndices = serverPanels.filter(sp => sp.has_image).map(sp => sp.index);
+          setPanelCacheKeys(prev => {
+            const next = { ...prev };
+            for (const idx of completedIndices) {
+              next[idx] = Date.now();
+            }
+            return next;
+          });
+          setGeneratingPanels(prev => {
+            const next = { ...prev };
+            for (const idx of completedIndices) {
+              if (next[idx] !== undefined) {
+                delete next[idx];
+              }
+            }
+            return next;
           });
         }
 
@@ -163,7 +191,6 @@ onStoryUpdate: (storyUpdate) => {
           setIsGenerating(false);
         }
       } catch {
-        // WebSocket remains the primary path; keep polling silent unless the explicit generate call fails.
       }
     };
 
@@ -174,18 +201,17 @@ onStoryUpdate: (storyUpdate) => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [state.jobId, isGenerating]);
+  }, [state.jobId, isGenerating, dispatch]);
 
   const handleGenerate = async () => {
     if (!state.jobId) return;
     setIsGenerating(true);
+    const panels = state.story?.panels || [];
     setProgress({ current: 0, total: panels.filter(p => !p.is_placeholder && !p.has_image).length || 6 });
     setError(null);
 
-    // Trigger panel generation using the dedicated endpoint
     try {
       await generatePanels(state.jobId);
-      // Panel generation will happen in the background, WebSocket updates progress
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to generate panel images';
       setError(errorMessage);
@@ -206,31 +232,46 @@ onStoryUpdate: (storyUpdate) => {
     setModalPanelIndex(null);
   };
 
-  const handleRegeneratePanel = useCallback(async (panelIndex: number) => {
+  const handleRegeneratePanel = useCallback(async (panelIndex: number, prompt?: string) => {
     if (!state.jobId) return;
-    handleImageGenerating('panel', panelIndex);
+    // Prevent duplicate regeneration calls
+    if (generatingPanels[panelIndex] !== undefined) return;
+    
+    // Immediately mark panel as generating to prevent duplicate clicks
+    // Use flushSync to ensure state update happens synchronously for UI feedback
+    flushSync(() => {
+      setPanelCacheKeys(prev => ({ ...prev, [panelIndex]: Date.now() }));
+      setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
+    });
+    
     try {
-      await regeneratePanel(state.jobId, panelIndex, panels[panelIndex]?.image_prompt);
+      // Use provided prompt or get from current panel state
+      const imagePrompt = prompt ?? panels[panelIndex]?.image_prompt;
+      await regeneratePanel(state.jobId, panelIndex, imagePrompt);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to regenerate panel';
       setError(errorMessage);
-      setIsGenerating(false);
+      // Clean up generating state on error
+      setGeneratingPanels(prev => {
+        const next = { ...prev };
+        delete next[panelIndex];
+        return next;
+      });
     }
-  }, [state.jobId, handleImageGenerating, panels]);
+  }, [state.jobId, panels, generatingPanels]);
 
-const handleUpdatePanel = useCallback((index: number, field: string, value: string) => {
+  const handleUpdatePanel = useCallback(async (index: number, field: string, value: string) => {
     if (!state.story?.panels) return;
     const newPanels = [...state.story.panels];
-    // Clear is_placeholder flag when user edits a previously-placeholder panel
-    // A panel is no longer a placeholder if both caption and image_prompt are non-empty
     const newCaption = field === 'caption' ? value : newPanels[index].caption;
     const newImagePrompt = field === 'image_prompt' ? value : newPanels[index].image_prompt;
-    const stillPlaceholder = (
-      !newCaption || newCaption.startsWith('[Placeholder') ||
-      !newImagePrompt || newImagePrompt.startsWith('[Placeholder')
-    );
-    newPanels[index] = { 
-      ...newPanels[index], 
+    // Check if BOTH required fields are filled (not placeholder or empty)
+    const hasRealCaption = newCaption && !newCaption.startsWith('[Placeholder');
+    const hasRealImagePrompt = newImagePrompt && !newImagePrompt.startsWith('[Placeholder');
+    // Panel is no longer a placeholder when both required fields have real content
+    const stillPlaceholder = !(hasRealCaption && hasRealImagePrompt);
+    newPanels[index] = {
+      ...newPanels[index],
       [field]: value,
       is_placeholder: stillPlaceholder,
     };
@@ -238,20 +279,30 @@ const handleUpdatePanel = useCallback((index: number, field: string, value: stri
       type: 'SET_STORY',
       payload: { ...state.story, panels: newPanels },
     });
-  }, [state.story, dispatch]);
+    if (state.jobId) {
+      try {
+        const characters = Array.isArray(newPanels[index].characters)
+          ? newPanels[index].characters
+          : String(newPanels[index].characters || '').split(',').map((name) => name.trim()).filter(Boolean);
+        await updatePanel(state.jobId, index, {
+          caption: field === 'caption' ? value : undefined,
+          image_prompt: field === 'image_prompt' ? value : undefined,
+          characters: field === 'characters' ? characters : undefined,
+        });
+      } catch (err) {
+        console.error('Failed to update panel:', err);
+      }
+    }
+  }, [state.story, state.jobId, dispatch]);
 
-  // Check for panels without images (missing = no image generated)
   const panelsWithoutImages = panels.filter(p => !p.is_placeholder && !p.has_image).length;
   const hasPlaceholders = panels.some(p =>
     p.is_placeholder || (p.caption && p.caption.startsWith('[Placeholder'))
   );
 
-  // User can proceed to Review only when ALL 6 panels have images generated
-  // and there are no placeholders that need editing
   const allPanelsHaveImages = panels.length === 6 && panelsWithoutImages === 0 && !hasPlaceholders;
   const generatingPanelNumber = Math.min(progress.current + 1, progress.total || 1);
 
-  // Find active panel step progress to display in the overall status
   const activeGenEntries = Object.entries(generatingPanels);
   const activeGenPanel = activeGenEntries.find(([_, v]) => v !== true);
 
@@ -345,6 +396,7 @@ const handleUpdatePanel = useCallback((index: number, field: string, value: stri
             panels={panels}
             jobId={state.jobId}
             generatingPanels={generatingPanels}
+            panelCacheKeys={panelCacheKeys}
             onPanelClick={handlePanelClick}
             onRegenerate={handleRegeneratePanel}
           />
@@ -355,17 +407,24 @@ const handleUpdatePanel = useCallback((index: number, field: string, value: stri
         <ImageLightbox src={lightboxUrl} onClose={() => setLightboxUrl(null)} />
       )}
 
-      {activeModalPanel && modalPanelIndex !== null && state.jobId && (
-        <PanelModal
-          isOpen={true}
-          onClose={handleCloseModal}
-          panel={activeModalPanel}
-          panelIndex={modalPanelIndex}
-          jobId={state.jobId}
-          onRegenerate={handleRegeneratePanel}
-          onUpdatePanel={handleUpdatePanel}
-        />
-      )}
+{activeModalPanel && modalPanelIndex !== null && state.jobId && (
+         <PanelModal
+           isOpen={true}
+           onClose={handleCloseModal}
+           panel={activeModalPanel}
+           panelIndex={modalPanelIndex}
+           jobId={state.jobId}
+           onRegenerate={async (prompt: string) => handleRegeneratePanel(modalPanelIndex, prompt)}
+           onUpdatePanel={handleUpdatePanel}
+           isRegenerating={generatingPanels[modalPanelIndex] !== undefined}
+           regenerationProgress={
+             generatingPanels[modalPanelIndex] && generatingPanels[modalPanelIndex] !== true
+               ? generatingPanels[modalPanelIndex] as { step: number; totalSteps: number }
+               : null
+           }
+           cacheKey={panelCacheKeys[modalPanelIndex]}
+         />
+       )}
     </div>
   );
 }

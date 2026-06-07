@@ -1,12 +1,23 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
 import { loadProject } from '../services/api';
 import { Spinner } from '../components/ui/Spinner';
 
+// Valid step paths that indicate explicit navigation
+const STEP_PATHS = [
+  'comicInfo',
+  'storyContent', 
+  'styleReference',
+  'panelBreakdown',
+  'panelImages',
+  'review',
+];
+
 export function ProjectLoader() {
   const { slug } = useParams<{ slug: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { dispatch } = useWizard();
   const [error, setError] = useState<string | null>(null);
 
@@ -17,6 +28,12 @@ export function ProjectLoader() {
       navigate('/');
       return;
     }
+
+    // Check if user is already on a specific step page (explicit navigation)
+    const currentPath = location.pathname;
+    const isOnSpecificStep = STEP_PATHS.some(step => 
+      currentPath.includes(`/${step}`)
+    );
 
     const fetchProject = async () => {
       try {
@@ -40,6 +57,11 @@ export function ProjectLoader() {
               panels: project.story.panels || [],
             }
           });
+        }
+
+        // If user explicitly navigated to a step, don't redirect based on stale state
+        if (isOnSpecificStep) {
+          return;
         }
 
         if (project.status === 'error' && project.story?.panels?.length) {
@@ -89,7 +111,7 @@ export function ProjectLoader() {
     };
 
     fetchProject();
-  }, [slug, navigate, dispatch]);
+  }, [slug, navigate, dispatch, location.pathname]);
 
   if (error) {
     return (
