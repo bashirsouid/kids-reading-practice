@@ -322,7 +322,7 @@ export function PanelImagesPage() {
   return (
     <div className="main-layout">
       <div className="form-section">
-        <div className="text-xs text-text-dim mb-3">Step 5: Panel Image Generation</div>
+        <div className="text-xs text-text-dim mb-3">Step 5: {state.story?.title ? `${state.story.title} - ` : ''}Panel Image Generation</div>
         <h2 className="text-xl text-gold mb-4">🎨 Generate Panel Images</h2>
 
         {error && (

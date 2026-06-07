@@ -1,4 +1,4 @@
-/**
+/*
  * StoryContentPage - Step 2: Edit the generated title and synopsis.
  *
  * Purpose: Allow users to review and edit the AI-generated story title and synopsis.
@@ -49,36 +49,36 @@ export function StoryContentPage() {
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-// Sync with wizard state only once on initial load, NOT on subsequent story updates
-   // to avoid overwriting user edits with stale server data.
-   const didSyncFromGlobal = React.useRef(false);
-   useEffect(() => {
-     if (!didSyncFromGlobal.current && state.story) {
-       didSyncFromGlobal.current = true;
-       if (state.story.title) {
-         setTitle(state.story.title);
-       }
-       if (state.story.synopsis) {
-         setSynopsis(state.story.synopsis);
-         setLastSavedSynopsis(state.story.synopsis);
-       }
-       // Character metadata indicates the reference step is ready.
-       if (state.story.character_bible) {
-         setStoryGenerated(true);
-       }
-     }
-   }, [state.story]);
+  // Sync with wizard state only once on initial load, NOT on subsequent story updates
+  // to avoid overwriting user edits with stale server data.
+  const didSyncFromGlobal = React.useRef(false);
+  useEffect(() => {
+    if (!didSyncFromGlobal.current && state.story) {
+      didSyncFromGlobal.current = true;
+      if (state.story.title) {
+        setTitle(state.story.title);
+      }
+      if (state.story.synopsis) {
+        setSynopsis(state.story.synopsis);
+        setLastSavedSynopsis(state.story.synopsis);
+      }
+      // Character metadata indicates the reference step is ready.
+      if (state.story.character_bible) {
+        setStoryGenerated(true);
+      }
+    }
+  }, [state.story]);
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'storyContent' });
   }, []);
 
-// Handle story updates from WebSocket - only track generation completion, don't overwrite user edits
-   const handleStoryUpdate = useCallback((storyUpdate?: WebSocketStory | null) => {
-     if (storyUpdate && storyUpdate.character_bible) {
-       setStoryGenerated(true);
-     }
-   }, []);
+  // Handle story updates from WebSocket - only track generation completion, don't overwrite user edits
+  const handleStoryUpdate = useCallback((storyUpdate?: WebSocketStory | null) => {
+    if (storyUpdate && storyUpdate.character_bible) {
+      setStoryGenerated(true);
+    }
+  }, []);
 
   // WebSocket hook to wait for story generation to complete after confirmation
   useWebSocket({
@@ -131,8 +131,7 @@ export function StoryContentPage() {
         if (status.story.character_bible) {
           setStoryGenerated(true);
         }
-      } catch {
-      }
+      } catch {}
     };
 
     refreshStatus();
@@ -231,7 +230,7 @@ export function StoryContentPage() {
   return (
     <div className="flex justify-center">
       <div className="form-section w-full max-w-8xl mt-10">
-        <div className="text-xs text-text-dim mb-3">Step 2: Story Content</div>
+        <div className="text-xs text-text-dim mb-3">Step 2: {state.story?.title ? `${state.story.title} - ` : ''}Story Content</div>
         <h2 className="text-xl text-gold mb-4">📖 Your Story</h2>
 
         {error && (

@@ -385,7 +385,7 @@ export function StyleReferencePage() {
       <div className="form-section">
         <div className="flex items-start justify-between mb-3">
           <div>
-            <div className="text-xs text-text-dim mb-1">Step 3: Style & Reference</div>
+            <div className="text-xs text-text-dim mb-1">Step 3: {state.story?.title ? `${state.story.title} - ` : ''}Style & Reference</div>
             <h2 className="text-xl text-gold">🎨 Style & Reference Image</h2>
           </div>
           <Button

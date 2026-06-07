@@ -85,7 +85,7 @@ export function ReviewPage() {
   return (
     <div className="main-layout">
       <div className="form-section">
-        <div className="text-xs text-text-dim mb-3">Step 6: Complete!</div>
+        <div className="text-xs text-text-dim mb-3">Step 6: {state.story?.title ? `${state.story.title} - ` : ''}Complete!</div>
         <h2 className="text-xl text-gold mb-4">🎉 Your Comic Is Ready</h2>
 
         <div className="mb-4">

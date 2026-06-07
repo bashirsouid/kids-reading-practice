@@ -137,7 +137,7 @@ const handleNext = async () => {
       <div className="form-section w-full max-w-8xl mt-10">
         <div className="flex items-start justify-between mb-3">
           <div>
-            <div className="text-xs text-text-dim mb-1">Step 4: Panel Breakdown</div>
+            <div className="text-xs text-text-dim mb-1">Step 4: {state.story?.title ? `${state.story.title} - ` : ''}Panel Breakdown</div>
             <h2 className="text-xl text-gold">📋 Panel Breakdown</h2>
           </div>
           {panels.length > 0 && (
