@@ -3,12 +3,16 @@ state.py — Global state for the backend.
 """
 
 import asyncio
+import threading
 from typing import Optional
 
 from .models import ComicJob
 
-# Thread-safe lock for websocket operations
+# Thread-safe lock for websocket operations (asyncio)
 _ws_lock = asyncio.Lock()
+
+# Thread-safe lock for job state modifications (threading)
+_job_state_lock = threading.Lock()
 
 # In-memory job store
 jobs: dict[str, ComicJob] = {}
@@ -25,7 +29,8 @@ __all__ = [
     "jobs",
     "active_websockets",
     "job_tasks",
-    "_ws_lock",  # Export the lock for thread-safe websocket access
+    "_ws_lock",
+    "_job_state_lock",  # Thread-safe lock for job state modifications
     "text_gen",
     "img_gen",
     "models_loaded",

@@ -40,12 +40,14 @@ class ComicJob:
     stage: str = "input"  # input, synopsis, story, reference, panel_breakdown, panels, complete, error
     wait_for_user: bool = False  # Pause and wait for user to click "Next"
     synopsis_seed: Optional[int] = None
+    randomness_level: int = 5  # 1-10 scale for story randomness, default is 5 (balanced)
 
 
 # ── Pydantic Request Models ──────────────────────────────────────────────────
 class GenerateRequest(BaseModel):
     mode: str  # "random", "themed", "custom"
     text: str = ""  # theme for "themed", full story for "custom", ignored for "random"
+    randomness_level: int = 5  # 1-10 scale for story randomness, default is 5 (balanced)
 
 
 class RegeneratePanelRequest(BaseModel):

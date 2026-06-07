@@ -8,12 +8,16 @@ import base64
 import logging
 import time
 import uuid
+import threading
 from typing import Optional
 
 import psutil
 from PIL import Image
 
 logger = logging.getLogger("comic-server")
+
+# Thread lock for PIL operations (PIL is not thread-safe)
+_pil_lock = threading.Lock()
 
 
 def log_system_resources(stage: str):
@@ -26,15 +30,19 @@ def log_system_resources(stage: str):
 
 
 def _image_to_base64(img, max_size: int = 512) -> str:
-    """Convert a PIL Image to a base64-encoded JPEG string."""
-    # Resize for thumbnail
-    ratio = min(max_size / img.width, max_size / img.height)
-    if ratio < 1:
-        new_size = (int(img.width * ratio), int(img.height * ratio))
-        img = img.resize(new_size)
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=80)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    """Convert a PIL Image to a base64-encoded JPEG string.
+    
+    Thread-safe - uses a lock since PIL operations are not thread-safe.
+    """
+    with _pil_lock:
+        # Resize for thumbnail
+        ratio = min(max_size / img.width, max_size / img.height)
+        if ratio < 1:
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            img = img.resize(new_size)
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=80)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 def _make_slug(title: str) -> str:

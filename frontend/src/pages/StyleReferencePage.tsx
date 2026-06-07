@@ -3,7 +3,6 @@
  * 
  * Purpose: Allow users to select art style and preview the reference prompt.
  * Generates master reference image for character consistency across panels.
- * The reference is generated from the synopsis + characters + selected style.
  * Proceeding advances job to the panel breakdown step.
  * 
  * Route: /styleReference
@@ -72,6 +71,7 @@ export function StyleReferencePage() {
   const [error, setError] = useState<string | null>(null);
   /** Step-level progress during reference image generation */
   const [refProgress, setRefProgress] = useState<{ step: number; totalSteps: number } | null>(null);
+  const [isRegeneratingProfile, setIsRegeneratingProfile] = useState(false);
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
@@ -135,13 +135,14 @@ export function StyleReferencePage() {
     dispatch({ type: 'SET_PAGE', payload: 'styleReference' });
   }, []);
 
-  // Auto-select first style if none is set, and auto-generate reference on first load
+  // Auto-select first style if none is set, and pre-generate story profile on first load
+  // without automatically generating the reference image (user must click "Generate Reference Image")
   useEffect(() => {
-    const initializeStyleAndGenerate = async () => {
+    const initializeStyleAndProfile = async () => {
       // Determine the style to use (prefer existing art_style, otherwise use first preset)
       const styleToUse = state.story?.art_style || PRESET_STYLES[0];
-      
-      // If no art style is set, use the first preset style
+
+      // Auto-select first style if missing
       if (!state.story?.art_style && PRESET_STYLES.length > 0) {
         const firstStyle = PRESET_STYLES[0];
         setArtStyle(firstStyle);
@@ -157,26 +158,47 @@ export function StyleReferencePage() {
           }
         }
       }
-      
-      // Auto-generate reference if no reference exists and not already generating
-      if (!hasReference && !isGeneratingRef && state.jobId) {
-        setIsGeneratingRef(true);
-        setHasReference(false);
-        setRefProgress(null);
+
+      // Determine if story profile data is missing.
+// Require characters, art_style, story_setting (by existence, allowing empty string), and a non‑empty character_bible.
+const profileMissing = !(
+  state.story?.characters?.length &&
+  state.story?.art_style &&
+  (state.story?.story_setting !== undefined) &&
+  !!state.story?.character_bible?.trim()
+);
+
+      // Regenerate story profile automatically if missing (without generating the reference image)
+      if (profileMissing && state.jobId) {
+        setIsRegeneratingProfile(true);
         setError(null);
         try {
-          await updateArtStyle(state.jobId, styleToUse);
-          await updateStorySetting(state.jobId, storySetting);
-          await generateMasterReference(state.jobId);
+          const result = await regenerateStoryProfile(state.jobId);
+          // Push the new profile into wizard state so the preview reflects it.
+          dispatch({
+            type: 'SET_STORY',
+            payload: {
+              ...state.story,
+              art_style: result.art_style || state.story?.art_style,
+              story_setting: result.story_setting || '',
+              character_bible: result.character_bible || '',
+              characters: result.characters || [],
+            },
+          });
+          if (result.art_style) setArtStyle(result.art_style);
+          if (result.story_setting !== undefined) setStorySetting(result.story_setting || '');
         } catch (err) {
-          const errorMessage = err instanceof Error ? err.message : 'Failed to generate reference';
-          setError(errorMessage);
-          setIsGeneratingRef(false);
+          setError(err instanceof Error ? err.message : 'Failed to generate story profile');
+        } finally {
+          setIsRegeneratingProfile(false);
         }
       }
+
+      // NOTE: No automatic reference image generation here – user can now review style
+      // before clicking "Generate Reference Image".
     };
-    
-    initializeStyleAndGenerate();
+
+    initializeStyleAndProfile();
   }, []); // Run once on mount
 
   // Listen for WebSocket updates for this job
@@ -297,11 +319,7 @@ export function StyleReferencePage() {
     }
   };
 
-  const [isRegeneratingProfile, setIsRegeneratingProfile] = useState(false);
-
-  // Recovery path for projects where an earlier run produced an empty/garbage
-  // character bible (the old parser was broken on compound words). This
-  // re-runs the LLM profile pass without touching title/synopsis/panels.
+  // Regenerate story profile manually (button still works)
   const handleRegenerateProfile = async () => {
     if (!state.jobId || !state.story) return;
     setIsRegeneratingProfile(true);
@@ -414,7 +432,7 @@ export function StyleReferencePage() {
               value={storySetting}
               onChange={(e) => setStorySetting(e.target.value)}
               onBlur={handleStorySettingBlur}
-              placeholder='One sentence — location, time of day, weather, mood, lighting. e.g. "a misty pine forest at twilight, soft moonlight, glowing fireflies"'
+              placeholder={`One sentence — location, time of day, weather, mood, lighting. e.g. "a misty pine forest at twilight, soft moonlight, glowing fireflies"`}
               rows={3}
               style={{ minHeight: '70px' }}
             />

@@ -7,6 +7,7 @@ const initialState: WizardState = {
   mode: 'random',
   manualStyle: 'Modern Pixar 3D animation style',
   story: null,
+  randomnessLevel: 5, // Default to balanced randomness (1-10 scale)
 
   page: 'home',
   modelStatus: 'loading',
@@ -23,6 +24,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, mode: action.payload };
     case 'SET_STORY':
       return { ...state, story: action.payload };
+    case 'SET_RANDOMNESS_LEVEL':
+      return { ...state, randomnessLevel: action.payload };
 
     case 'SET_PAGE':
       return { ...state, page: action.payload };

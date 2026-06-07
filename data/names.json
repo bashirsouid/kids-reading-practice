@@ -1,0 +1,61 @@
+{
+  "first_names": {
+    "animals": [
+      "Pip", "Barnaby", "Mittens", "Scout", "Nova", "Rascal", "Willow", "Finn", "Coco", "Atlas",
+      "Bramble", "Glow", "Whisper", "Dash", "Luna", "Clover", "Sprout", "Pebble", "Fern", "Oakley",
+      "Maple", "River", "Sage", "Juniper", "Birch", "Hazel", "Rowan", "Cedar", "Thistle", "Basil",
+      "Poppy", "Daisy", "Clover", "Blossom", "Rosemary", "Parsley", "Dill", "Ginger", "Pepper", "Nutmeg",
+      "Saffron", "Coriander", "Chive", "Basilisk", "Thyme", "Yarrow", "Foxglove", "Bluebell", "Pansy", "Violet",
+      "Jasper", "Milo", "Oscar", "Theo", "Felix", "Arthur", "Winston", "Rupert", "Algernon", "Sebastian",
+      "Beatrice", "Cordelia", "Evangeline", "Seraphina", "Theodora", "Cornelia", "Winifred", "Prudence", "Artemisia", "Calendula",
+      "Bodhi", "Kai", "Leif", "Soren", "Eamon", "Caspian", "Phineas", "Thaddeus", "Gideon", "Leopold",
+      "Ophelia", "Juniper", "Aurelia", "Seren", "Elowen", "Nerys", "Tamsin", "Lyra", "Zephyr", "Corvus"
+    ],
+    "humans": [
+      "Amira", "Kofi", "Zara", "Mateo", "Sofia", "Aiden", "Maya", "Ravi", "Leila", "Carlos",
+      "Yuki", "Anika", "Dante", "Freya", "Leandro", "Nadia", "Omar", "Priya", "Rafiq", "Saira",
+      "Tariq", "Vera", "Wei", "Ximena", "Yasin", "Zahra", "Arlo", "Cleo", "Ezra", "Flora",
+      "Hugo", "Iris", "Jude", "Kira", "Leo", "Maya", "Noah", "Opal", "Phoenix", "Quinn",
+      "Rosa", "Sage", "Theo", "Uma", "Vince", "Wren", "Xander", "Yara", "Zack", "Ada",
+      "Beck", "Clara", "Eli", "Faye", "Graham", "Hannah", "Isaac", "June", "Keaton", "Lena",
+      "Miles", "Nora", "Otto", "Piper", "Quincy", "Rose", "Silas", "Tessa", "Uriah", "Vera"
+    ],
+    "fantasy": [
+      "Lirael", "Theron", "Eldrin", "Lyralei", "Fendrel", "Aeris", "Galadriel", "Elric", "Morwyn", "Draven",
+      "Elysia", "Kaelen", "Seraphina", "Zephyros", "Calanthor", "Mirabel", "Thalindra", "Gwydion", "Rhiannon", "Althaea",
+      "Bramble", "Glow", "Whisper", "Shadow", "Light", "Storm", "Frost", "Ember", "Stone", "Wind",
+      "Pix", "Thorn", "Blossom", "Nettle", "Acorn", "Hawthorn", "Briar", "Thimble", "Wick", "Ash"
+    ],
+    "ocean": [
+      "Coral", "Finley", "Pearl", "Marina", "Neptune", "Oceana", "Shell", "Reef", "Tide", "Marlin",
+      "Coralia", "Dolphin", "Seahorse", "Turtle", "Crab", "Anemone", "Starfish", "Jelly", "Kraken", "Merrow",
+      "Calypso", "Poseidon", "Nereid", "Oceanus", "Thalassa", "Naiad", "Triton", "Nixie", "Undine", "Selkie"
+    ],
+    "pirates": [
+      "Captain Orion", "Navigator Nix", "First Mate Ruby", "Swabbie Jack", "Cook Coral", "Quartermaster Quinn",
+      "Boatswain Blue", "Carpenter Finn", "Gunners Jax", "Powder Monkey Mia", "Lookout Leif", "Helmsman Hugo",
+      "Blackwater", "Red Anne", "Salt Pete", "Iron Charlotte", "Salty Sam", "Storm Elena", "Gold Ruby", "Silver Quinn"
+    ],
+    "unicorns": [
+      "Stardust", "Moonbeam", "Rainbow", "Crystal", "Sparkle", "Twinkle", "Shimmer", "Glimmer", "Radiant", "Luminous",
+      "Princess Celestia", "King Astrum", "Duke Gleam", "Countess Moon", "Baron Spark", "Lady Rainbow", "Sir Stardust",
+      "Unicornia", "Magicorn", "Pegasara", "Allicorn", "Mysticor", "Dreamalon", "Stellaris", "Cosmica"
+    ],
+    "dinosaurs": [
+      "Rexy", "Tricera", "Steggy", "Dippy", "Ptera", "Bronto", "Ankylo", "Stompy", "Roary", "Sharpie",
+      "Dino", "Rex", "Saurus", "Claw", "Tooth", "Tail", "Foot", "Longneck", "Snapper", "Flyer"
+    ],
+    "robots": [
+      "Zeta", "Alpha", "Beta", "Gamma", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India",
+      "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra",
+      "Tango", "Uniform", "Victor", "Whiskey", "Xray", "Yankee", "Zulu", "Robo", "Cyber", "Tech"
+    ]
+  },
+  "last_names": [
+    "Brightwood", "Moonwhisper", "Sunheart", "Stardust", "Nightshade", "Goldenhoof", "Silverstream",
+    "Ironwill", "Swiftfoot", "Strongbranch", "Wisdomleaf", "Braveheart", "Kindspirit", "Truehope",
+    "Fairweather", "Quickdraw", "Longstride", "Deepwater", "Highpeak", "Lowvalley", "Westwind", "Eastbrook",
+    "Northstar", "Southmoon", "Falconridge", "Eagleflight", "Hawkwind", "Ravenclaw", "Owlsight", "Wolvesong",
+    "Bearpaw", "Deerhoof", "Rabbitfoot", "Foxfire", "Badgerclaw", "Ottermere", "Beaverdam", "Muskrush"
+  ]
+}

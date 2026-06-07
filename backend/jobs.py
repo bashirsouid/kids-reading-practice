@@ -95,7 +95,7 @@ async def process_job(job):
                 # Add timeout for synopsis generation (30 seconds)
                 synopsis = await asyncio.wait_for(
                     loop.run_in_executor(
-                        None, global_state.text_gen.generate_random_synopsis, theme, seed
+                        None, global_state.text_gen.generate_random_synopsis, theme, seed, job.randomness_level
                     ),
                     timeout=30.0
                 )
@@ -172,7 +172,7 @@ async def process_job(job):
         try:
             title = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, global_state.text_gen.generate_title, job.input_text
+                    None, global_state.text_gen.generate_title, job.input_text, job.randomness_level
                 ),
                 timeout=15.0
             )
@@ -217,12 +217,15 @@ async def process_job(job):
         try:
             synopsis_for_profile = job.story.synopsis if job.story else job.input_text
             title_for_profile = job.story.title if job.story else title
+            theme_hint = job.input_text if job.mode == "themed" else None
             story = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
                     lambda: global_state.text_gen.generate_reference_profile(
                         synopsis_for_profile,
                         title_for_profile,
+                        randomness_level=job.randomness_level,
+                        theme_hint=theme_hint,
                     ),
                 ),
                 timeout=30.0

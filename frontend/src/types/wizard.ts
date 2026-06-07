@@ -46,6 +46,7 @@ export interface WizardState {
   mode: StoryMode;
   manualStyle: string;
   story: Story | null;
+  randomnessLevel: number;
 
   page: string;
   modelStatus: 'loading' | 'ready' | 'error';
@@ -58,6 +59,7 @@ export type WizardAction =
   | { type: 'SET_JOB_ID'; payload: string }
   | { type: 'SET_SLUG'; payload: string }
   | { type: 'SET_STORY'; payload: Story }
+  | { type: 'SET_RANDOMNESS_LEVEL'; payload: number }
 
   | { type: 'SET_PAGE'; payload: string }
   | { type: 'SET_MODEL_STATUS'; payload: 'loading' | 'ready' | 'error' }

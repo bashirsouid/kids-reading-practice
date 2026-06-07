@@ -89,9 +89,9 @@ export function HomePage() {
       </Card>
 
       {projects.length > 0 && (
-        <Card className="max-w-3xl w-full">
+        <Card className="max-w-5xl w-full">
           <h2 className="text-xl text-gold mb-4 text-center">Recent Projects</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             {projects.map(p => (
               <div 
                 key={p.slug} 

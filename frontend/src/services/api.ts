@@ -26,6 +26,7 @@ export async function checkHealth(): Promise<{ models_loaded: boolean; models_lo
 export async function generateStory(data: {
   mode: string;
   text?: string;
+  randomness_level?: number;
 }): Promise<{ job_id: string; slug?: string }> {
   const response = await fetch(`${API_BASE}/generate`, {
     method: 'POST',

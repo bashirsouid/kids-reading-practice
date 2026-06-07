@@ -277,10 +277,11 @@ async def api_generate(req: GenerateRequest):
         input_text=req.text,
         created_at=time.time(),
         slug=_make_project_slug(job_id),
+        randomness_level=req.randomness_level,
     )
     global_state.jobs[job_id] = job
     save_jobs()  # Persist immediately for recovery on refresh
-    logger.info(f"New job created: {job_id} (mode={req.mode})")
+    logger.info(f"New job created: {job_id} (mode={req.mode}, randomness={req.randomness_level})")
     
     # Start autonomous story/profile initialization. Later stages are explicit
     # API calls so browser tabs do not drive backend control flow.
@@ -750,21 +751,18 @@ async def _generate_panels_task(job):
             await broadcast_image_generating(job, "panel", panel.index)
 
         def progress_callback(panel_idx: int, completed: int, total: int):
-            """Update job progress and broadcast as panels complete in parallel."""
-            job.progress_current = completed
-            # Generate thumbnail for completed panel
-            if panel_idx < len(story.panels):
-                panel = story.panels[panel_idx]
-                if panel.image:
-                    job.panel_thumbnails[panel_idx] = _image_to_base64(
-                        panel.image, max_size=256
-                    )
-            save_jobs()
-            # Dispatch coroutine to event loop from worker thread
-            asyncio.run_coroutine_threadsafe(
-                broadcast_job_update(job),
-                loop,
-            )
+            """Update job progress as panels complete in parallel."""
+            with global_state._job_state_lock:
+                job.progress_current = completed
+                # Generate thumbnail for completed panel
+                if panel_idx < len(story.panels):
+                    panel = story.panels[panel_idx]
+                    if panel.image:
+                        job.panel_thumbnails[panel_idx] = _image_to_base64(
+                            panel.image, max_size=256
+                        )
+            # Note: We do NOT broadcast from this callback to avoid deadlock.
+            # The broadcast will happen once all panels complete after the executor returns.
 
         try:
             # Run parallel panel generation in executor

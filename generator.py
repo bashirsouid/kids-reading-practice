@@ -7,6 +7,7 @@ Image generation runs via OpenRouter API (sourceful/riverflow-v2.5-fast:free).
 No local GPU/NPU inference required - all models run remotely via OpenRouter.
 """
 
+import json
 import os
 import random
 import re
@@ -27,6 +28,9 @@ from PIL import Image, ImageDraw, ImageFont
 from backend.config import IMAGE_GEN_CONCURRENCY
 
 logger = logging.getLogger("comic-generator")
+
+# PIL thread safety lock - PIL operations are not thread-safe
+_pil_lock = threading.Lock()
 
 
 # - Constants -
@@ -51,6 +55,85 @@ TEXT_MODEL_ID = PRIMARY_TEXT_MODEL_ID
 # Image model: OpenRouter image generation model
 # Uses sourceful/riverflow-v2.5-fast:free for free image generation
 IMAGE_MODEL_ID = os.getenv("IMAGE_MODEL_ID", "sourceful/riverflow-v2.5-fast:free")
+
+
+# - Load Random Data for Enhanced Variety -
+_DATA_DIR = Path(__file__).parent / "data"
+
+def _load_json_data(filename: str) -> dict:
+    """Load JSON data file with fallback to empty dict."""
+    try:
+        path = _DATA_DIR / filename
+        if path.exists():
+            with open(path, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load {filename}: {e}")
+    return {}
+
+_THEMES_DATA = _load_json_data("themes.json")
+_NAMES_DATA = _load_json_data("names.json")
+
+# Default fallback themes if no data file
+RANDOM_THEMES = _THEMES_DATA.get("all_themes", [
+    "A brave little mouse goes on an adventure in a big city",
+    "Two best friends discover a magical garden behind their school",
+    "A clumsy dragon tries to learn how to fly",
+    "A curious kitten explores a haunted toy store on Halloween",
+    "A team of baby animals start their own pizza delivery service",
+    "A young astronaut discovers friendly aliens on the moon",
+    "A shy penguin learns to dance at the winter festival",
+    "A robot and a puppy become unlikely best friends",
+    "A pirate parrot finds a treasure map in a library book",
+    "A group of dinosaurs start a rock band",
+    "A tiny fairy helps a lost butterfly find its way home",
+    "A superhero kid whose power is making people laugh",
+    "A wizard's cat accidentally turns everything into candy",
+    "Two siblings shrink down and explore their own backyard jungle",
+    "A baby yeti discovers summer for the first time",
+])
+
+def _get_random_names(theme_hint: Optional[str] = None, count: int = 5) -> List[str]:
+    """Get random character names, optionally biased toward theme category.
+    
+    Returns a list of names to suggest to the LLM for character creation.
+    """
+    if not _NAMES_DATA or "first_names" not in _NAMES_DATA:
+        return []
+    
+    all_names = []
+    categories = _NAMES_DATA["first_names"]
+    
+    # Try to match theme hint to category
+    if theme_hint:
+        theme_lower = theme_hint.lower()
+        theme_category = None
+        
+        # Map theme hints to categories
+        if any(k in theme_lower for k in ["ocean", "sea", "fish", "mermaid", "whale", "dolphin"]):
+            theme_category = "ocean"
+        elif any(k in theme_lower for k in ["pirate", "ship", "treasure", "captain"]):
+            theme_category = "pirates"
+        elif any(k in theme_lower for k in ["unicorn", "fairy", "magic", "wizard", "dragon"]):
+            theme_category = "fantasy"
+        elif any(k in theme_lower for k in ["dinosaur", "t-rex", "pterodactyl"]):
+            theme_category = "dinosaurs"
+        elif any(k in theme_lower for k in ["robot", "space", "alien", "future", "sci-fi"]):
+            theme_category = "robots"
+        elif any(k in theme_lower for k in ["animal", "forest", "wild", "zoo"]):
+            theme_category = "animals"
+        
+        if theme_category and theme_category in categories:
+            all_names.extend(categories[theme_category])
+    
+    # Always include some names from all categories for variety
+    for cat_names in categories.values():
+        all_names.extend(cat_names)
+    
+    # Deduplicate and shuffle
+    unique_names = list(set(all_names))
+    random.shuffle(unique_names)
+    return unique_names[:count]
 
 
 # - Data Classes -
@@ -168,8 +251,19 @@ class TextGenerator:
                 continue
         raise RuntimeError("All OpenRouter models failed to generate a response")
 
-    def generate(self, prompt: str, max_tokens: int = 1500) -> str:
-        """Generate text from a prompt using OpenRouter API."""
+    def generate(self, prompt: str, max_tokens: int = 1500, randomness_level: int = 5) -> str:
+        """Generate text from a prompt using OpenRouter API.
+        
+        Args:
+            prompt: The text prompt for generation
+            max_tokens: Maximum tokens in response
+            randomness_level: Control for LLM temperature (1-10, default 5).
+                           Higher values = more creative/random outputs.
+        """
+        # Scale randomness_level (1-10) to temperature (0.7-1.0)
+        temperature = 0.7 + (randomness_level - 1) * 0.03
+        temperature = min(1.0, max(0.7, temperature))
+        
         with self._lock:
             self.load()
             messages = [
@@ -186,15 +280,22 @@ class TextGenerator:
                 },
                 {"role": "user", "content": prompt},
             ]
-            return self._call_api(messages, max_tokens=max_tokens, temperature=0.5)
+            return self._call_api(messages, max_tokens=max_tokens, temperature=temperature)
 
-    def generate_story(self, synopsis: str, max_retries: int = 5) -> ComicStory:
-        """Generate a complete comic story structure with retry logic."""
-        prompt = _build_story_prompt(synopsis)
+    def generate_story(self, synopsis: str, max_retries: int = 5, randomness_level: int = 5, theme_hint: Optional[str] = None) -> ComicStory:
+        """Generate a complete comic story structure with retry logic.
+        
+        Args:
+            synopsis: Story synopsis to expand into full comic
+            max_retries: Number of retry attempts
+            randomness_level: Control for LLM temperature (1-10, default 5)
+            theme_hint: Optional theme hint for character name suggestions
+        """
+        prompt = _build_story_prompt(synopsis, theme_hint)
         for attempt in range(max_retries):
             raw = ""
             try:
-                raw = self.generate(prompt, max_tokens=2000)
+                raw = self.generate(prompt, max_tokens=2000, randomness_level=randomness_level)
                 result = _parse_story_text(raw, synopsis)
                 logger.info("Story generation succeeded on attempt " + str(attempt + 1) + ". Panels: " + str(len(result.panels)))
                 return result
@@ -208,16 +309,24 @@ class TextGenerator:
                     )
         raise ValueError("Story generation failed")
 
-    def generate_reference_profile(self, synopsis: str, title: str = "Untitled", max_retries: int = 5) -> ComicStory:
-        """Generate style and character metadata for the reference step only."""
-        prompt = _build_reference_profile_prompt(synopsis, title)
+    def generate_reference_profile(self, synopsis: str, title: str = "Untitled", max_retries: int = 5, randomness_level: int = 5, theme_hint: Optional[str] = None) -> ComicStory:
+        """Generate style and character metadata for the reference step only.
+        
+        Args:
+            synopsis: Story synopsis to base characters on
+            title: Story title
+            max_retries: Number of retry attempts
+            randomness_level: Control for LLM temperature (1-10, default 5)
+            theme_hint: Optional theme hint for character name suggestions
+        """
+        prompt = _build_reference_profile_prompt(synopsis, title, theme_hint)
         for attempt in range(max_retries):
             raw = ""
             try:
                 # 1200 tokens gives the CHARACTER_BIBLE paragraph headroom
                 # even with 3-4 detailed characters; 900 was sometimes
                 # clipping mid-character.
-                raw = self.generate(prompt, max_tokens=1200)
+                raw = self.generate(prompt, max_tokens=1200, randomness_level=randomness_level)
                 result = _parse_reference_profile_text(raw, synopsis, title)
                 logger.info("Reference profile generation succeeded on attempt " + str(attempt + 1) + ".")
                 return result
@@ -231,34 +340,63 @@ class TextGenerator:
                     )
         raise ValueError("Reference profile generation failed")
 
-    def generate_random_synopsis(self, theme: Optional[str] = None, seed: Optional[int] = None) -> str:
-        """Generate a longer random story synopsis (5-8 sentences)."""
+    def generate_random_synopsis(self, theme: Optional[str] = None, seed: Optional[int] = None, randomness_level: int = 5) -> str:
+        """Generate a longer random story synopsis (5-8 sentences).
+        
+        Args:
+            theme: Optional theme/topic for the story
+            seed: Optional seed for deterministic generation
+            randomness_level: Control for LLM temperature (1-10, default 5)
+        """
         if seed is not None:
             random.seed(seed)
+        
+        # Scale randomness_level (1-10) to temperature (0.8-1.0)
+        temperature = 0.8 + (randomness_level - 1) * 0.02
+        temperature = min(1.0, max(0.8, temperature))
+        
+        # Get random name suggestions to guide character variety
+        suggested_names = _get_random_names(theme, count=8)
+        name_hint = ""
+        if suggested_names:
+            name_hint = "\n\nConsider using diverse character names like: " + ", ".join(suggested_names[:8]) + ". "
+            name_hint += "Feel free to create your own names as well!"
+        
         if theme:
             prompt = (
                 "Generate a fun children's comic book synopsis (5-8 sentences) about the theme: '"
                 + theme + "'. "
-                "It should include a clear situation or setup, a conflict or action, and a short resolution. "
-                "Respond with ONLY the synopsis text, nothing else."
+                + "It should include a clear situation or setup, a conflict or action, and a short resolution. "
+                + name_hint
+                + "Respond with ONLY the synopsis text, nothing else."
             )
         else:
             base = random.choice(RANDOM_THEMES)
             prompt = (
                 "Expand this into a fun children's comic book synopsis (5-8 sentences): '"
                 + base + "'. "
-                "Make sure it has a clear situation/setup, a conflict/action, and a brief resolution. "
-                "Respond with ONLY the synopsis text, nothing else."
+                + "Make sure it has a clear situation/setup, a conflict/action, and a brief resolution. "
+                + name_hint
+                + "Respond with ONLY the synopsis text, nothing else."
             )
 
         messages = [
             {"role": "system", "content": "You are a creative children's story writer. Respond with only the synopsis text."},
             {"role": "user", "content": prompt},
         ]
-        return self._call_api(messages, max_tokens=500, temperature=0.8)
+        return self._call_api(messages, max_tokens=500, temperature=temperature)
 
-    def generate_title(self, synopsis: str) -> str:
-        """Generate a catchy title for the story based on the synopsis."""
+    def generate_title(self, synopsis: str, randomness_level: int = 5) -> str:
+        """Generate a catchy title for the story based on the synopsis.
+        
+        Args:
+            synopsis: Story synopsis to base title on
+            randomness_level: Control for LLM temperature (1-10, default 5)
+        """
+        # Scale randomness_level (1-10) to temperature (0.6-0.85)
+        temperature = 0.6 + (randomness_level - 1) * 0.025
+        temperature = min(0.85, max(0.6, temperature))
+        
         prompt = (
             "Generate a catchy, fun title (max 5 words) for a children's comic book based on this synopsis:\n"
             "'" + synopsis + "'\n\n"
@@ -268,7 +406,7 @@ class TextGenerator:
             {"role": "system", "content": "You are a creative children's book author. Respond with only the title."},
             {"role": "user", "content": prompt},
         ]
-        title = self._call_api(messages, max_tokens=50, temperature=0.7)
+        title = self._call_api(messages, max_tokens=50, temperature=temperature)
         return title.strip().strip('"').strip("'")
 
 
@@ -290,20 +428,26 @@ _BIBLE_FORMAT_INSTRUCTIONS = (
 )
 
 
-def _build_story_prompt(synopsis: str) -> str:
+def _build_story_prompt(synopsis: str, theme_hint: Optional[str] = None) -> str:
     """Build the labeled plain-text prompt for a comic story.
-
-    The CHARACTER_BIBLE is requested as a bulleted per-line list — one
-    character per line, "- Name: description" — rather than a flowing
-    paragraph. Flowing paragraphs are hard to parse reliably because
-    descriptions naturally contain compound words ("palm-sized",
-    "pale-blue"), and the earlier parser's name/desc separator regex
-    treated those internal dashes as boundaries, producing nonsense
-    "character names" and producing blank studio images.
+    
+    Args:
+        synopsis: Story synopsis to expand
+        theme_hint: Optional theme hint for character name suggestions
     """
+    # Get random name suggestions to guide character variety
+    suggested_names = _get_random_names(theme_hint, count=6)
+    name_suggestions = ""
+    if suggested_names:
+        name_suggestions = (
+            "Consider using diverse, creative character names like these for inspiration: "
+            + ", ".join(suggested_names[:6]) + ". Feel free to invent your own names!\n\n"
+        )
+    
     return (
         "Write a 6-panel children's comic book story based on this synopsis:\n"
         '"' + synopsis + '"\n\n'
+        + name_suggestions +
         "Use EXACTLY the following labeled plain-text format. Do not output JSON.\n"
         "Do not output markdown code fences. Do not add any commentary before or after.\n\n"
         "TITLE: <story title on one line>\n\n"
@@ -325,12 +469,28 @@ def _build_story_prompt(synopsis: str) -> str:
     )
 
 
-def _build_reference_profile_prompt(synopsis: str, title: str) -> str:
-    """Build metadata only for Step 3 reference generation (no panels yet)."""
+def _build_reference_profile_prompt(synopsis: str, title: str, theme_hint: Optional[str] = None) -> str:
+    """Build metadata only for Step 3 reference generation (no panels yet).
+    
+    Args:
+        synopsis: Story synopsis to base characters on
+        title: Story title
+        theme_hint: Optional theme hint for character name suggestions
+    """
+    # Get random name suggestions to guide character variety
+    suggested_names = _get_random_names(theme_hint, count=6)
+    name_suggestions = ""
+    if suggested_names:
+        name_suggestions = (
+            "Consider using diverse, creative character names like these for inspiration: "
+            + ", ".join(suggested_names[:6]) + ". Feel free to invent your own names!\n\n"
+        )
+    
     return (
         "Create character reference metadata for this children's comic book.\n\n"
         "TITLE: " + title + "\n\n"
         'SYNOPSIS: "' + synopsis + '"\n\n'
+        + name_suggestions +
         "Use EXACTLY the following labeled plain-text format. Do not output JSON.\n"
         "Do not output markdown code fences. Do not add panels, scenes, captions, or commentary.\n\n"
         "TITLE: <story title on one line>\n\n"
@@ -671,7 +831,9 @@ class ImageGenerator:
             timeout=270.0,
         )
         response.raise_for_status()
+        logger.info(f"Image API response received for seed={seed}, parsing JSON...")
         data = response.json()
+        logger.info(f"Image API JSON parsed, extracting image data for seed={seed}...")
 
         # Parse the response - OpenRouter image models return images
         # in message.images array with base64 data URLs
@@ -721,13 +883,15 @@ class ImageGenerator:
                     f"Message: {message}"
                 )
 
-        # Load the image using PIL
-        img = Image.open(BytesIO(img_data))
-        img = img.convert("RGB")
-        
+        # Load the image using PIL (thread-safe with lock)
+        with _pil_lock:
+            img = Image.open(BytesIO(img_data))
+            img = img.convert("RGB")
+
         # Resize to requested dimensions if needed
         if img.width != width or img.height != height:
-            img = img.resize((width, height), Image.LANCZOS)
+            with _pil_lock:
+                img = img.resize((width, height), Image.LANCZOS)
 
         logger.info(
             f"Image generation complete (seed={seed}): "
