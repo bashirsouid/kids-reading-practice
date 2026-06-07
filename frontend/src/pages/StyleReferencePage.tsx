@@ -19,6 +19,7 @@ import {
   updateArtStyle,
   updateStorySetting,
   regenerateStoryProfile,
+  getJobStatus,
 } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { ArtStyleSelector } from '../components/style/ArtStyleSelector';
@@ -210,7 +211,55 @@ export function StyleReferencePage() {
     },
   });
 
+  useEffect(() => {
+    if (!state.jobId) return;
+    let cancelled = false;
+
+    const refreshStatus = async () => {
+      try {
+        const status = await getJobStatus(state.jobId!);
+        if (cancelled) return;
+
+        if (status.story) {
+          dispatch({
+            type: 'SET_STORY',
+            payload: {
+              ...(state.story || {}),
+              ...status.story,
+              master_reference: status.has_reference ? 'ready' : state.story?.master_reference,
+            },
+          });
+        }
+
+        if (status.has_reference) {
+          setHasReference(true);
+          setIsGeneratingRef(false);
+          setRefProgress(null);
+        } else if (status.operations?.reference || status.status === 'generating_reference') {
+          setIsGeneratingRef(true);
+          setHasReference(false);
+        } else {
+          setHasReference(false);
+        }
+
+        if (status.error) {
+          setError(status.error);
+          setIsGeneratingRef(false);
+        }
+      } catch {
+      }
+    };
+
+    refreshStatus();
+    const interval = window.setInterval(refreshStatus, isGeneratingRef || !hasReference ? 2500 : 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [state.jobId, dispatch, isGeneratingRef, hasReference]);
+
   const handleStyleSelect = async (style: string) => {
+    const changed = style !== artStyle;
     setArtStyle(style);
     if (state.jobId && state.story) {
       dispatch({
@@ -219,6 +268,9 @@ export function StyleReferencePage() {
       });
       try {
         await updateArtStyle(state.jobId, style);
+        if (changed) {
+          setHasReference(false);
+        }
       } catch (err) {
         console.error('Failed to update art style', err);
       }
@@ -229,12 +281,16 @@ export function StyleReferencePage() {
   // gets sent to the model, so the prompt preview updates as the user types.
   const handleStorySettingBlur = async () => {
     if (!state.jobId || !state.story) return;
+    const changed = storySetting !== (state.story.story_setting || '');
     dispatch({
       type: 'UPDATE_STORY_FIELD',
       payload: { field: 'story_setting', value: storySetting },
     });
     try {
       await updateStorySetting(state.jobId, storySetting);
+      if (changed) {
+        setHasReference(false);
+      }
     } catch (err) {
       console.error('Failed to update story setting', err);
       setError(err instanceof Error ? err.message : 'Failed to update world setting');

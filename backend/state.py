@@ -13,6 +13,7 @@ _ws_lock = asyncio.Lock()
 # In-memory job store
 jobs: dict[str, ComicJob] = {}
 active_websockets: dict[str, list] = {}
+job_tasks: dict[str, dict[str, asyncio.Task]] = {}
 
 # Model instances (loaded once at startup)
 text_gen: Optional[object] = None  # TextGenerator
@@ -23,6 +24,7 @@ models_loading = False
 __all__ = [
     "jobs",
     "active_websockets",
+    "job_tasks",
     "_ws_lock",  # Export the lock for thread-safe websocket access
     "text_gen",
     "img_gen",

@@ -134,11 +134,15 @@ export async function generatePanels(jobId: string): Promise<void> {
 }
 
 export async function getJobStatus(jobId: string): Promise<{
+  job_id: string;
+  slug?: string;
   status: string;
   stage: string;
   progress_current: number;
   progress_total: number;
   error?: string | null;
+  has_reference?: boolean;
+  operations?: Record<string, boolean>;
   story?: {
     title?: string;
     synopsis?: string;

@@ -395,6 +395,7 @@ export function PanelImagesPage() {
           <PanelGrid
             panels={panels}
             jobId={state.jobId}
+            columns={2}
             generatingPanels={generatingPanels}
             panelCacheKeys={panelCacheKeys}
             onPanelClick={handlePanelClick}

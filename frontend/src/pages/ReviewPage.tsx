@@ -7,92 +7,61 @@
  *
  * Route: /review
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
 import { PanelGrid } from '../components/panel/PanelGrid';
 import { Button } from '../components/ui/Button';
-import { useWebSocket } from '../hooks/useWebSocket';
 import { ImageLightbox } from '../components/ui/ImageLightbox';
-import { getPanelImageUrl } from '../services/api';
-import type { PanelGenerationProgress } from '../components/panel/PanelCard';
+import { getJobStatus, getPanelImageUrl } from '../services/api';
 
 export function ReviewPage() {
   const navigate = useNavigate();
   const { state, dispatch } = useWizard();
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
-  const [generatingPanels, setGeneratingPanels] = useState<Record<number, PanelGenerationProgress | true>>({});
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [isComplete, setIsComplete] = useState(false);
   const [panelCacheKeys, setPanelCacheKeys] = useState<Record<number, number>>({});
 
   useEffect(() => {
     dispatch({ type: 'SET_PAGE', payload: 'review' });
   }, []);
 
-  const handleImageGenerating = useCallback((target: 'reference' | 'panel', panelIndex: number | null) => {
-    if (target === 'panel' && panelIndex !== null) {
-      setPanelCacheKeys(prev => ({ ...prev, [panelIndex]: Date.now() }));
-      setGeneratingPanels(prev => ({ ...prev, [panelIndex]: true }));
-      setIsGenerating(true);
-    }
-  }, []);
+  useEffect(() => {
+    if (!state.jobId) return;
+    let cancelled = false;
 
-  const handleImageProgress = useCallback((target: 'reference' | 'panel', panelIndex: number | null, step: number, totalSteps: number) => {
-    if (target === 'panel' && panelIndex !== null) {
-      setGeneratingPanels(prev => ({
-        ...prev,
-        [panelIndex]: { step, totalSteps },
-      }));
-    }
-  }, []);
-
-  useWebSocket({
-    jobId: state.jobId || '',
-    onStageChange: (stage) => {
-      if (stage === 'complete') {
-        setIsGenerating(false);
-        setIsComplete(true);
-        setGeneratingPanels({});
+    const refreshStatus = async () => {
+      try {
+        const status = await getJobStatus(state.jobId!);
+        if (cancelled || !status.story) return;
+        dispatch({
+          type: 'SET_STORY',
+          payload: {
+            ...(state.story || {}),
+            ...status.story,
+          },
+        });
+        if (status.story.panels) {
+          setPanelCacheKeys(prev => {
+            const next = { ...prev };
+            for (const panel of status.story!.panels || []) {
+              if (panel.has_image) next[panel.index || 0] = Date.now();
+            }
+            return next;
+          });
+        }
+      } catch {
       }
-    },
-    onError: (msg) => {
-      setIsGenerating(false);
-      setGeneratingPanels({});
-    },
-    onImageGenerating: handleImageGenerating,
-    onImageProgress: handleImageProgress,
-    onStoryUpdate: (storyUpdate) => {
-      if (!storyUpdate?.panels) return;
-      const currentPanels = state.story?.panels;
-      if (!currentPanels || currentPanels.length === 0) return;
+    };
 
-      const updatedPanelIndices = storyUpdate.panels
-        .filter(p => p.has_image)
-        .map(p => p.index);
-
-      if (updatedPanelIndices.length === 0) return;
-
-      setPanelCacheKeys(prev => {
-        const next = { ...prev };
-        for (const idx of updatedPanelIndices) {
-          next[idx] = Date.now();
-        }
-        return next;
-      });
-      setGeneratingPanels(prev => {
-        const next = { ...prev };
-        for (const idx of updatedPanelIndices) {
-          if (next[idx] !== undefined) {
-            delete next[idx];
-          }
-        }
-        return next;
-      });
-    },
-  });
+    refreshStatus();
+    const interval = window.setInterval(refreshStatus, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [state.jobId, dispatch]);
 
   const handleExportPNG = () => {
     if (state.jobId) {
@@ -143,7 +112,7 @@ export function ReviewPage() {
           <PanelGrid
             panels={state.story.panels}
             jobId={state.jobId}
-            generatingPanels={generatingPanels}
+            columns={2}
             panelCacheKeys={panelCacheKeys}
             showImageStatus={false}
             onPanelClick={handlePanelClick}

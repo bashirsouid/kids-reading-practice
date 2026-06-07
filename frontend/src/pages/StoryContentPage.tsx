@@ -13,7 +13,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
-import { updateTitle, updateSynopsis, proceedToNextStage } from '../services/api';
+import { updateTitle, updateSynopsis, proceedToNextStage, regenerateStoryProfile, getJobStatus } from '../services/api';
 import { WizardNav } from '../components/ui/WizardNav';
 import { Spinner } from '../components/ui/Spinner';
 import { ErrorMessage } from '../components/ui/ErrorMessage';
@@ -45,6 +45,7 @@ export function StoryContentPage() {
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForStory, setIsWaitingForStory] = useState(false);
   const [storyGenerated, setStoryGenerated] = useState(false);
+  const [lastSavedSynopsis, setLastSavedSynopsis] = useState(state.story?.synopsis || '');
 
   const projectPath = (page: string) => state.slug ? `/${state.slug}/${page}` : `/${page}`;
 
@@ -59,6 +60,7 @@ export function StoryContentPage() {
        }
        if (state.story.synopsis) {
          setSynopsis(state.story.synopsis);
+         setLastSavedSynopsis(state.story.synopsis);
        }
        // Character metadata indicates the reference step is ready.
        if (state.story.character_bible) {
@@ -89,36 +91,107 @@ export function StoryContentPage() {
     }, []),
   });
 
-  const handleUpdate = async () => {
+  useEffect(() => {
     if (!state.jobId) return;
+    let cancelled = false;
+
+    const refreshStatus = async () => {
+      try {
+        const status = await getJobStatus(state.jobId!);
+        if (cancelled || !status.story) return;
+
+        if (!didSyncFromGlobal.current) {
+          didSyncFromGlobal.current = true;
+          setTitle(status.story.title || '');
+          setSynopsis(status.story.synopsis || '');
+          setLastSavedSynopsis(status.story.synopsis || '');
+          dispatch({
+            type: 'SET_STORY',
+            payload: {
+              ...(state.story || {}),
+              ...status.story,
+              master_reference: status.has_reference ? 'ready' : state.story?.master_reference,
+            },
+          });
+        } else if (status.story.character_bible && !storyGenerated) {
+          dispatch({
+            type: 'SET_STORY',
+            payload: {
+              ...(state.story || {}),
+              art_style: status.story.art_style || state.story?.art_style || '',
+              story_setting: status.story.story_setting || '',
+              character_bible: status.story.character_bible || '',
+              characters: status.story.characters || [],
+              panels: state.story?.panels || status.story.panels || [],
+              master_reference: status.has_reference ? 'ready' : state.story?.master_reference,
+            },
+          });
+        }
+
+        if (status.story.character_bible) {
+          setStoryGenerated(true);
+        }
+      } catch {
+      }
+    };
+
+    refreshStatus();
+    const interval = window.setInterval(refreshStatus, storyGenerated ? 8000 : 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [state.jobId, dispatch, storyGenerated]);
+
+  const handleUpdate = async () => {
+    if (!state.jobId) return false;
     setError(null);
     try {
       if (title) await updateTitle(state.jobId, title);
-      if (synopsis) await updateSynopsis(state.jobId, synopsis);
+      if (synopsis && synopsis !== lastSavedSynopsis) {
+        await updateSynopsis(state.jobId, synopsis);
+        setLastSavedSynopsis(synopsis);
+      }
+      return true;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to update story';
       setError(errorMessage);
+      return false;
     }
   };
 
   const handleNext = async () => {
-    await handleUpdate();
     if (!state.jobId) return;
 
-    // If reference metadata already exists, just navigate.
-    if (storyGenerated) {
+    const needsProfile = !storyGenerated || synopsis !== lastSavedSynopsis;
+    const saved = await handleUpdate();
+    if (!saved) return;
+    if (!needsProfile) {
       navigate(projectPath('styleReference'));
       return;
     }
 
-    // Otherwise, wait for story generation to complete
     setIsWaitingForStory(true);
     setError(null);
 
     try {
+      const profile = await regenerateStoryProfile(state.jobId);
+      dispatch({
+        type: 'SET_STORY',
+        payload: {
+          ...(state.story || {}),
+          title,
+          synopsis,
+          art_style: profile.art_style || state.story?.art_style || '',
+          story_setting: profile.story_setting || '',
+          character_bible: profile.character_bible || '',
+          characters: profile.characters || [],
+          panels: state.story?.panels || [],
+        },
+      });
+      setStoryGenerated(true);
       await proceedToNextStage(state.jobId);
-      // We don't navigate here anymore. 
-      // The useEffect below will handle navigation when the WebSocket updates the state.
+      navigate(projectPath('styleReference'));
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to proceed';
       setError(errorMessage);
@@ -127,12 +200,6 @@ export function StoryContentPage() {
   };
 
   // Auto-navigate when story is ready and we are waiting
-  useEffect(() => {
-    if (isWaitingForStory && storyGenerated) {
-      navigate(projectPath('styleReference'));
-    }
-  }, [isWaitingForStory, storyGenerated, navigate, state.slug]);
-
   const handleBack = () => {
     navigate('/');
   };
@@ -185,7 +252,12 @@ export function StoryContentPage() {
             <label>Synopsis</label>
 <textarea
                value={synopsis}
-               onChange={(e) => setSynopsis(e.target.value)}
+               onChange={(e) => {
+                 setSynopsis(e.target.value);
+                 if (e.target.value !== lastSavedSynopsis) {
+                   setStoryGenerated(false);
+                 }
+               }}
                onBlur={handleUpdate}
                style={{ minHeight: '400px' }}
              />

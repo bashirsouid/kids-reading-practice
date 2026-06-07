@@ -121,14 +121,16 @@ async def broadcast_job_update(job):
     if job.error:
         data["type"] = "error"
         data["message"] = job.error
-    elif job.story and job.story.master_reference is not None:
+    elif job.status.value == "complete" or job.stage == "complete":
         data["type"] = "complete"
-        data["reference_ready"] = True
     else:
         data["type"] = "progress"
         # include progress fields for UI updates
         data["progress"] = job.progress_current
         data["total"] = job.progress_total
+
+    if job.story and job.story.master_reference is not None:
+        data["reference_ready"] = True
 
     # Include story details if available
     if job.story:

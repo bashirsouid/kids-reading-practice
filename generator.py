@@ -1059,7 +1059,13 @@ def generate_all_panels(
     if story.master_reference is None:
         generate_master_reference(story, img_gen)
 
-    total = len(story.panels)
+    panels_to_generate = [
+        panel for panel in story.panels
+        if not panel.is_placeholder and panel.image is None
+    ]
+    total = len(panels_to_generate)
+    if total == 0:
+        return
     
     def generate_panel(panel: Panel):
         gen_w, gen_h = _panel_gen_dims(panel.index)
@@ -1079,7 +1085,7 @@ def generate_all_panels(
     # IMAGE_GEN_CONCURRENCY is clamped between 1-6 in config
     with concurrent.futures.ThreadPoolExecutor(max_workers=IMAGE_GEN_CONCURRENCY) as executor:
         # Submit all panel generation tasks
-        future_to_panel = {executor.submit(generate_panel, panel): panel for panel in story.panels}
+        future_to_panel = {executor.submit(generate_panel, panel): panel for panel in panels_to_generate}
         
         # Process completed tasks as they finish
         completed = 0

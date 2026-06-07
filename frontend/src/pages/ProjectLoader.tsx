@@ -53,6 +53,7 @@ export function ProjectLoader() {
               art_style: project.story.art_style || '',
               story_setting: project.story.story_setting || '',
               character_bible: project.story.character_bible || '',
+              master_reference: project.has_reference ? 'ready' : undefined,
               characters: project.story.characters || [],
               panels: project.story.panels || [],
             }

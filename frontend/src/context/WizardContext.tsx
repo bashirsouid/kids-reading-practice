@@ -2,8 +2,8 @@ import React, { createContext, useContext, useReducer, ReactNode } from 'react';
 import { WizardState, WizardAction, StoryMode } from '../types/wizard';
 
 const initialState: WizardState = {
-  jobId: typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('comic_job_id') : null,
-  slug: typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('comic_slug') : null,
+  jobId: null,
+  slug: null,
   mode: 'random',
   manualStyle: 'Modern Pixar 3D animation style',
   story: null,
@@ -16,12 +16,8 @@ const initialState: WizardState = {
 function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
     case 'SET_JOB_ID':
-      if (action.payload) sessionStorage.setItem('comic_job_id', action.payload as string);
-      else sessionStorage.removeItem('comic_job_id');
       return { ...state, jobId: action.payload };
     case 'SET_SLUG':
-      if (action.payload) sessionStorage.setItem('comic_slug', action.payload as string);
-      else sessionStorage.removeItem('comic_slug');
       return { ...state, slug: action.payload };
     case 'SET_MODE':
       return { ...state, mode: action.payload };
@@ -44,8 +40,6 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         },
       };
     case 'RESET':
-      sessionStorage.removeItem('comic_job_id');
-      sessionStorage.removeItem('comic_slug');
       return { ...initialState, jobId: null, slug: null, story: null, modelStatus: state.modelStatus };
     default:
       return state;

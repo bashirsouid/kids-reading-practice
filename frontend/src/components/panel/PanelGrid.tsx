@@ -25,11 +25,15 @@ interface PanelGridProps {
    panelCacheKeys?: PanelCacheKeys;
    /** When false, hide the "Image ready" status label in each PanelCard. */
    showImageStatus?: boolean;
+   columns?: 2 | 3;
  }
  
- export function PanelGrid({ panels, jobId, onPanelClick, onRegenerate, generatingPanels, panelCacheKeys = {}, showImageStatus = true }: PanelGridProps) {
+ export function PanelGrid({ panels, jobId, onPanelClick, onRegenerate, generatingPanels, panelCacheKeys = {}, showImageStatus = true, columns = 3 }: PanelGridProps) {
+   const columnClass = columns === 2
+     ? 'grid-cols-1 sm:grid-cols-2'
+     : 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3';
    return (
-     <div className="panel-grid grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5 mb-4">
+     <div className={`panel-grid grid ${columnClass} gap-3 mb-4`}>
        {panels.map((panel, idx) => {
          const genState = generatingPanels?.[idx];
          const isGenerating = genState !== undefined;
@@ -54,4 +58,3 @@ interface PanelGridProps {
      </div>
    );
  }
-

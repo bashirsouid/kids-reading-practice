@@ -13,19 +13,14 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from generator import (
-    ComicStory,
-    Panel,
     Character,
     render_page,
     generate_master_reference,
     generate_all_panels,
     regenerate_panel,
-    panel_seed,
-    _panel_gen_dims,
-    _panel_prompt,
 )
 
-from ..config import STATIC_DIR, OUTPUT_DIR
+from ..config import STATIC_DIR, OUTPUT_DIR, JOB_ASSETS_DIR
 from ..models import (
     JobStatus, ComicJob,
     GenerateRequest, RegeneratePanelRequest, UpdateCharactersRequest,
@@ -46,6 +41,64 @@ from ..jobs import process_job
 
 logger = logging.getLogger("comic-server")
 router = APIRouter()
+
+
+def _delete_reference_asset(job_id: str) -> None:
+    ref_path = JOB_ASSETS_DIR / job_id / "master_reference.jpg"
+    if ref_path.exists():
+        ref_path.unlink()
+
+
+def _delete_panel_asset(job_id: str, panel_index: int) -> None:
+    panel_path = JOB_ASSETS_DIR / job_id / f"panel_{panel_index}.jpg"
+    if panel_path.exists():
+        panel_path.unlink()
+
+
+def _delete_all_panel_assets(job_id: str) -> None:
+    assets_dir = JOB_ASSETS_DIR / job_id
+    if not assets_dir.exists():
+        return
+    for panel_path in assets_dir.glob("panel_*.jpg"):
+        panel_path.unlink()
+
+
+def _mark_panel_image_invalid(job, panel_index: int) -> None:
+    if not job.story or panel_index >= len(job.story.panels):
+        return
+    job.story.panels[panel_index].image = None
+    job.panel_thumbnails.pop(panel_index, None)
+    _delete_panel_asset(job.job_id, panel_index)
+    if job.stage == "complete":
+        job.stage = "panels"
+        job.status = JobStatus.READY
+
+
+def _get_job_tasks(job_id: str) -> dict[str, asyncio.Task]:
+    return global_state.job_tasks.setdefault(job_id, {})
+
+
+def _task_is_running(job_id: str, name: str) -> bool:
+    task = global_state.job_tasks.get(job_id, {}).get(name)
+    return bool(task and not task.done())
+
+
+def _start_job_task(job_id: str, name: str, coro_factory):
+    tasks = _get_job_tasks(job_id)
+    existing = tasks.get(name)
+    if existing and not existing.done():
+        return existing, False
+
+    task = asyncio.create_task(coro_factory())
+    tasks[name] = task
+
+    def cleanup(done_task):
+        current = global_state.job_tasks.get(job_id, {}).get(name)
+        if current is done_task:
+            global_state.job_tasks.get(job_id, {}).pop(name, None)
+
+    task.add_done_callback(cleanup)
+    return task, True
 
 
 # ── Static File Routes ─────────────────────────────────────────────────────────
@@ -78,7 +131,16 @@ async def health_check():
         "status": "ok" if global_state.models_loaded else "loading",
         "models_loaded": global_state.models_loaded,
         "models_loading": global_state.models_loading,
-        "active_jobs": len([j for j in global_state.jobs.values() if j.status not in (JobStatus.COMPLETE, JobStatus.ERROR)]),
+        "active_jobs": len([
+            j for j in global_state.jobs.values()
+            if j.status in (
+                JobStatus.QUEUED,
+                JobStatus.GENERATING_SYNOPSIS,
+                JobStatus.GENERATING_STORY,
+                JobStatus.GENERATING_REFERENCE,
+                JobStatus.GENERATING_PANELS,
+            )
+        ]),
     }
 
 
@@ -124,6 +186,7 @@ async def get_job_status(job_id: str):
 
 def _build_job_status_response(job):
     """Build the job status response dict."""
+    tasks = global_state.job_tasks.get(job.job_id, {})
     result = {
         "job_id": job.job_id,
         "slug": job.slug,
@@ -136,6 +199,10 @@ def _build_job_status_response(job):
         "error": job.error,
         "wait_for_user": job.wait_for_user,
         "has_reference": job.story.master_reference is not None if job.story else False,
+        "operations": {
+            name: not task.done()
+            for name, task in tasks.items()
+        },
     }
     if job.story:
         result["story"] = {
@@ -215,9 +282,9 @@ async def api_generate(req: GenerateRequest):
     save_jobs()  # Persist immediately for recovery on refresh
     logger.info(f"New job created: {job_id} (mode={req.mode})")
     
-    # Start processing job directly (no queue) - use create_task since process_job
-    # has wait_for_user loops that pause execution
-    asyncio.create_task(process_job(job))
+    # Start autonomous story/profile initialization. Later stages are explicit
+    # API calls so browser tabs do not drive backend control flow.
+    _start_job_task(job_id, "initial", lambda: process_job(job))
     
     return {"job_id": job_id, "slug": job.slug}
 
@@ -241,6 +308,10 @@ async def api_delete_project(slug: str):
         raise HTTPException(status_code=404, detail="Job not found")
     
     job_id = job.job_id
+    for task in global_state.job_tasks.get(job_id, {}).values():
+        if not task.done():
+            task.cancel()
+    global_state.job_tasks.pop(job_id, None)
     
     # Delete assets directory first
     delete_job_assets(job_id)
@@ -329,6 +400,16 @@ async def api_update_synopsis(req: UpdateSynopsisRequest):
         raise HTTPException(status_code=404, detail="Job not found")
 
     job.story.synopsis = req.synopsis
+    job.input_text = req.synopsis
+    job.story.character_bible = ""
+    job.story.characters = []
+    job.story.master_reference = None
+    job.story.panels = []
+    job.panel_thumbnails.clear()
+    _delete_reference_asset(req.job_id)
+    _delete_all_panel_assets(req.job_id)
+    job.stage = "story"
+    job.status = JobStatus.READY
     save_jobs()
     return {"status": "ok"}
 
@@ -341,7 +422,17 @@ async def api_update_art_style(req: UpdateArtStyleRequest):
         raise HTTPException(status_code=404, detail="Job not found")
 
     logger.info(f"Updating art style for job {req.job_id} to: {req.art_style}")
-    job.story.art_style = req.art_style
+    if job.story.art_style != req.art_style:
+        job.story.art_style = req.art_style
+        job.story.master_reference = None
+        for panel in job.story.panels:
+            panel.image = None
+        job.panel_thumbnails.clear()
+        _delete_reference_asset(req.job_id)
+        _delete_all_panel_assets(req.job_id)
+        if job.stage in ("panel_breakdown", "panels", "complete"):
+            job.stage = "reference"
+            job.status = JobStatus.READY
     save_jobs()
     return {"status": "ok"}
 
@@ -359,7 +450,17 @@ async def api_update_story_setting(req: UpdateStorySettingRequest):
         raise HTTPException(status_code=404, detail="Job not found")
 
     logger.info(f"Updating story setting for job {req.job_id}")
-    job.story.story_setting = req.story_setting
+    if getattr(job.story, "story_setting", "") != req.story_setting:
+        job.story.story_setting = req.story_setting
+        job.story.master_reference = None
+        for panel in job.story.panels:
+            panel.image = None
+        job.panel_thumbnails.clear()
+        _delete_reference_asset(req.job_id)
+        _delete_all_panel_assets(req.job_id)
+        if job.stage in ("panel_breakdown", "panels", "complete"):
+            job.stage = "reference"
+            job.status = JobStatus.READY
     save_jobs()
     return {"status": "ok"}
 
@@ -439,6 +540,8 @@ async def api_generate_panel_breakdown(job_id: str):
             story.characters = previous_story.characters
 
     job.story = story
+    job.panel_thumbnails.clear()
+    _delete_all_panel_assets(job_id)
     job.stage = "panel_breakdown"
     job.status = JobStatus.PANEL_BREAKDOWN
     if not job.slug:
@@ -476,7 +579,9 @@ async def api_generate_reference(job_id: str):
     if not job.story:
         raise HTTPException(status_code=400, detail="Story not generated yet")
 
-    asyncio.create_task(_generate_reference_task(job))
+    _, started = _start_job_task(job_id, "reference", lambda: _generate_reference_task(job))
+    if not started:
+        return {"status": "ok", "message": "Reference generation already running"}
     return {"status": "ok", "message": "Reference generation started"}
 
 
@@ -517,6 +622,15 @@ async def api_regenerate_story_profile(job_id: str):
     job.story.story_setting = new_profile.story_setting
     job.story.character_bible = new_profile.character_bible
     job.story.characters = new_profile.characters
+    job.story.master_reference = None
+    for panel in job.story.panels:
+        panel.image = None
+    job.panel_thumbnails.clear()
+    _delete_reference_asset(job_id)
+    _delete_all_panel_assets(job_id)
+    job.status = JobStatus.READY
+    job.stage = "story"
+    job.error = None
 
     logger.info(
         "Regenerated story profile for job " + job_id + ": "
@@ -571,6 +685,9 @@ async def _generate_reference_task(job):
         await asyncio.sleep(0.5)
 
         job.progress_current = 1
+        job.status = JobStatus.READY
+        if job.stage == "story":
+            job.stage = "reference"
         save_jobs()
         await broadcast_job_update(job)
 
@@ -595,10 +712,10 @@ async def api_generate_panels(job_id: str):
     if not job.story or not job.story.master_reference:
         raise HTTPException(status_code=400, detail="Master reference not generated yet")
 
-    if job.status == JobStatus.GENERATING_PANELS:
+    if _task_is_running(job_id, "panels") or job.status == JobStatus.GENERATING_PANELS:
         return {"status": "ok", "message": "Already generating panels"}
 
-    asyncio.create_task(_generate_panels_task(job))
+    _start_job_task(job_id, "panels", lambda: _generate_panels_task(job))
     return {"status": "ok", "message": "Panel generation started"}
 
 
@@ -698,9 +815,10 @@ async def api_proceed_to_next_stage(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.stage == "synopsis_confirmation":
-        # Signal the process_job loop to proceed to reference generation
-        job.wait_for_user = False
+    if job.stage in ("synopsis", "story", "synopsis_confirmation"):
+        if _task_is_running(job_id, "initial") or not job.story or not job.story.character_bible:
+            raise HTTPException(status_code=409, detail="Story profile is still being prepared")
+        job.stage = "reference"
     elif job.stage == "reference":
         if not job.story or not job.story.master_reference:
             raise HTTPException(status_code=400, detail="Master reference not generated successfully - cannot proceed to panel breakdown")
@@ -743,8 +861,12 @@ async def api_update_panel(req: UpdatePanelRequest):
     if req.caption is not None:
         panel.caption = req.caption
     if req.image_prompt is not None:
+        if panel.image_prompt != req.image_prompt:
+            _mark_panel_image_invalid(job, req.panel_index)
         panel.image_prompt = req.image_prompt
     if req.characters is not None:
+        if panel.characters != req.characters:
+            _mark_panel_image_invalid(job, req.panel_index)
         panel.characters = req.characters
 
     if panel.is_placeholder:
@@ -775,8 +897,12 @@ async def api_update_panels(req: UpdatePanelsRequest):
         if "caption" in panel_data:
             panel.caption = panel_data["caption"]
         if "image_prompt" in panel_data:
+            if panel.image_prompt != panel_data["image_prompt"]:
+                _mark_panel_image_invalid(job, idx)
             panel.image_prompt = panel_data["image_prompt"]
         if "characters" in panel_data:
+            if panel.characters != panel_data["characters"]:
+                _mark_panel_image_invalid(job, idx)
             panel.characters = panel_data["characters"]
         if "is_placeholder" in panel_data:
             panel.is_placeholder = panel_data["is_placeholder"]

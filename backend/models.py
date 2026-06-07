@@ -12,6 +12,7 @@ from pydantic import BaseModel
 class JobStatus(str, Enum):
     """Status enum for comic generation jobs."""
     QUEUED = "queued"
+    READY = "ready"
     GENERATING_SYNOPSIS = "generating_synopsis"
     GENERATING_STORY = "generating_story"
     GENERATING_REFERENCE = "generating_reference"
