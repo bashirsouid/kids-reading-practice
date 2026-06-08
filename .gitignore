@@ -12,3 +12,4 @@ build/
 WORKFLOW_CHANGES_TODO.md
 .aider*
 .cache/
+tmp/

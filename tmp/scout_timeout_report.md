@@ -10,7 +10,7 @@
 - **backend/jobs.py**
   - Lines 112, 117, 167, 194, 259: Various timeouts for synopsis, panel, and other generation steps (30‑90 seconds).
   - Lines 376‑379: Panel generation timeout **60 seconds per panel**.
-
+aaa
 - **generator.py**
   - Line 149: HTTP request timeout set to **120 seconds** for image generation service.
   - Line 673: Timeout **180 seconds** (context unclear).
