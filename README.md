@@ -2,7 +2,9 @@
 
 An AI-powered comic book generator that creates engaging 6-panel reading practice materials for children. This version uses **OpenRouter API** for both text and image generation, requiring no local GPU or NPU hardware.
 
-![Example Comic](examples/Penguin_s_Dance_94f7980d.png)
+There are a lot of pre-generated sample comics in the `examples/` folder if you just want to select a pre-generated one to print. I haven't read all of them though so I dont have any recommendations for the best ones.
+
+![Example Comic](examples/Basil_s_Big_Bend_fe213bca-2666-4a63-a675-9f48c286a545.png)
 
 ---
 
